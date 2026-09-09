@@ -1,0 +1,14 @@
+# 下载的论文
+papers/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# 系统/编辑器
+.DS_Store
+.idea/
+.vscode/
