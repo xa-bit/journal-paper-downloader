@@ -1,1 +1,5 @@
 requests>=2.31
+
+# 可选：浏览器自动化下载（Web 界面默认首选的下载方式）
+# pip install playwright && python -m playwright install chromium
+playwright>=1.40

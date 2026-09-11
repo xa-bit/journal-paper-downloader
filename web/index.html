@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>期刊文献下载器</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <header class="app-header">
+    <h1>📄 期刊文献下载器</h1>
+    <p class="subtitle">输入期刊网址检索文献，生成下载清单，扫盘后批量下载开放获取（OA）PDF</p>
+  </header>
+
+  <main class="container">
+    <!-- 模块一：文献检索 -->
+    <section class="card">
+      <h2>文献检索</h2>
+
+      <div id="url-rows" class="url-rows">
+        <div class="url-row">
+          <input
+            type="text"
+            class="journal-url-input"
+            placeholder="期刊网址，如 https://agupubs.onlinelibrary.wiley.com/journal/19448007 或 https://www.nature.com/ngeo/"
+            autocomplete="off"
+          />
+          <button type="button" class="secondary row-remove" title="删除该行">×</button>
+        </div>
+      </div>
+      <div class="url-actions">
+        <button type="button" id="add-url-btn" class="secondary">＋ 增加期刊网址</button>
+        <button type="button" id="split-url-btn" class="secondary">⇱ 分离多网址行</button>
+        <button type="button" id="search-all-btn" class="primary">检索期刊</button>
+      </div>
+      <p class="hint">
+        支持一次输入多个期刊；单行内粘贴多个网址（空格 / 逗号 / 换行分隔）后点“分离多网址行”可自动拆成多行。
+      </p>
+      <p id="journal-msg" class="hint"></p>
+
+      <div id="browse-area" class="browse-area hidden">
+        <div class="tree-pane">
+          <div id="tree" class="tree"></div>
+        </div>
+        <div class="detail-pane" id="detail-pane">
+          <p class="empty">点击文章标题，在此查看详情。</p>
+        </div>
+      </div>
+
+      <div class="manifest-bar">
+        <span id="selected-summary" class="summary">已选 0 篇</span>
+        <button id="save-manifest-btn" class="primary" disabled>生成下载清单</button>
+        <span id="manifest-msg" class="hint"></span>
+      </div>
+    </section>
+
+    <!-- 模块二：扫盘与下载 -->
+    <section class="card">
+      <h2>扫盘与下载</h2>
+      <div class="settings-grid">
+        <label class="field">
+          <span>本地目录</span>
+          <input type="text" id="local-root" placeholder="/mnt/d/paper" value="papers" />
+        </label>
+        <label class="field">
+          <span>Unpaywall 邮箱</span>
+          <input type="text" id="email" value="paper-dl@localhost" />
+        </label>
+      </div>
+      <p class="hint">
+        下载将在本地目录下按 <code>期刊名/出版卷/文章名/</code> 逐级生成子文件夹；PDF 以 DOI 尾缀命名（如
+        <code>2025JC023188.pdf</code>），并同时生成同名 <code>.txt</code> 信息文件（标题、日期、作者、DOI 等）。
+      </p>
+      <div class="strategy-setting">
+        <span class="field-label">下载方式排序（从上到下依次尝试，点击 ↑↓ 调整）</span>
+        <ul id="strategy-list" class="strategy-list"></ul>
+      </div>
+      <div class="settings-grid">
+        <label class="field">
+          <span>每页等待时间（分钟）</span>
+          <input type="text" id="wait-min" value="5" inputmode="numeric" />
+        </label>
+        <label class="field">
+          <span>无响应最大刷新次数</span>
+          <input type="text" id="max-refresh" value="3" inputmode="numeric" />
+        </label>
+        <label class="field">
+          <span>任务间隔（秒）</span>
+          <input type="text" id="task-interval" value="5" inputmode="numeric" />
+        </label>
+        <label class="field checkbox-field">
+          <span>生成信息文件</span>
+          <input type="checkbox" id="gen-info" checked />
+        </label>
+      </div>
+      <p class="hint">
+        浏览器自动化会打开真实浏览器窗口：等待时间内无下载响应会自动刷新（超过刷新次数后跳过并尝试下一种方式）；
+        遇到登录 / 人机验证时页面保持打开，等待你在浏览器中手动处理后自动继续。
+      </p>
+      <div id="manifest-info" class="manifest-info hidden"></div>
+      <div class="download-bar">
+        <button id="scan-btn" class="secondary">扫描本地目录</button>
+        <button id="fetch-btn" class="primary" disabled>下载缺失文件</button>
+        <button id="stop-btn" class="secondary hidden">停止下载</button>
+        <button id="resume-btn" class="primary hidden">继续下载</button>
+        <button id="open-dir-btn" class="secondary" disabled>打开本地目录</button>
+        <span id="scan-summary" class="summary"></span>
+      </div>
+      <ul id="scan-list" class="download-list"></ul>
+    </section>
+  </main>
+
+  <footer class="app-footer">
+    <p>仅下载开放获取文献；付费墙论文会提示通过出版商页面获取，不会绕过付费墙。</p>
+  </footer>
+
+  <!-- 浏览器自动化人工干预横幅（检测到登录/验证时显示） -->
+  <div id="auth-banner" class="auth-banner hidden">
+    <span id="auth-banner-text" class="auth-text"></span>
+    <button id="auth-done-btn" class="secondary">我已完成验证，继续等待</button>
+    <button id="auth-skip-btn" class="secondary">跳过此篇</button>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

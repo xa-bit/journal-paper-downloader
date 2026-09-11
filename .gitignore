@@ -1,6 +1,13 @@
 # 下载的论文
 papers/
 
+# Web 端下载清单缓存
+download-manifest.json
+server/cache/
+
+# Node
+node_modules/
+
 # Python
 __pycache__/
 *.py[cod]

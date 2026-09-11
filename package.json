@@ -1,0 +1,11 @@
+{
+  "name": "journal-paper-downloader",
+  "version": "1.0.0",
+  "private": true,
+  "description": "期刊文献下载工具：通过 DOI / arXiv ID / 论文标题下载开放获取（OA）论文 PDF",
+  "scripts": {
+    "start": "node server/index.js",
+    "dev": "node server/index.js"
+  },
+  "license": "MIT"
+}
