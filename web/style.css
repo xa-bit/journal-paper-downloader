@@ -30,6 +30,32 @@ body {
   padding: 32px 16px 16px;
 }
 
+/* 语言切换（中 / English）：固定在页眉右上角 */
+.app-header {
+  position: relative;
+}
+
+.lang-switch {
+  position: absolute;
+  top: 24px;
+  right: 20px;
+}
+
+.lang-switch select {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 6px 10px;
+  font-size: 13px;
+  background: #fff;
+  color: var(--text);
+  cursor: pointer;
+}
+
+.lang-switch select:focus {
+  outline: 2px solid rgba(37, 99, 235, 0.25);
+  border-color: var(--primary);
+}
+
 .app-header h1 {
   font-size: 26px;
 }

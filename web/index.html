@@ -3,19 +3,25 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>期刊文献下载器</title>
+  <title data-i18n="app_title">期刊文献下载器</title>
   <link rel="stylesheet" href="style.css" />
 </head>
 <body>
   <header class="app-header">
-    <h1>📄 期刊文献下载器</h1>
-    <p class="subtitle">输入期刊网址检索文献，生成下载清单，扫盘后通过浏览器自动化批量下载 PDF</p>
+    <div class="lang-switch">
+      <select id="lang-select" aria-label="界面语言 / Language">
+        <option value="zh">中文</option>
+        <option value="en">English</option>
+      </select>
+    </div>
+    <h1 data-i18n="app_heading">📄 期刊文献下载器</h1>
+    <p class="subtitle" data-i18n="subtitle">输入期刊网址检索文献，生成下载清单，扫盘后通过浏览器自动化批量下载 PDF</p>
   </header>
 
   <main class="container">
     <!-- 模块一：文献检索 -->
     <section class="card">
-      <h2>文献检索</h2>
+      <h2 data-i18n="search_title">文献检索</h2>
 
       <div id="url-rows" class="url-rows">
         <div class="url-row">
@@ -23,17 +29,18 @@
             type="text"
             class="journal-url-input"
             placeholder="期刊网址，如 https://agupubs.onlinelibrary.wiley.com/journal/19448007 或 https://www.nature.com/ngeo/"
+            data-i18n-placeholder="url_input_ph"
             autocomplete="off"
           />
-          <button type="button" class="secondary row-remove" title="删除该行">×</button>
+          <button type="button" class="secondary row-remove" title="删除该行" data-i18n-title="remove_row">×</button>
         </div>
       </div>
       <div class="url-actions">
-        <button type="button" id="add-url-btn" class="secondary">＋ 增加期刊网址</button>
-        <button type="button" id="split-url-btn" class="secondary">⇱ 分离多网址行</button>
-        <button type="button" id="search-all-btn" class="primary">检索期刊</button>
+        <button type="button" id="add-url-btn" class="secondary" data-i18n="add_url">＋ 增加期刊网址</button>
+        <button type="button" id="split-url-btn" class="secondary" data-i18n="split_urls">⇱ 分离多网址行</button>
+        <button type="button" id="search-all-btn" class="primary" data-i18n="search_journals">检索期刊</button>
       </div>
-      <p class="hint">
+      <p class="hint" data-i18n="multi_url_hint">
         支持一次输入多个期刊；单行内粘贴多个网址（空格 / 逗号 / 换行分隔）后点“分离多网址行”可自动拆成多行。
       </p>
       <p id="journal-msg" class="hint"></p>
@@ -43,15 +50,16 @@
           <div id="tree" class="tree"></div>
         </div>
         <div class="detail-pane" id="detail-pane">
-          <p class="empty">点击文章标题，在此查看详情。</p>
+          <p class="empty" data-i18n="detail_empty">点击文章标题，在此查看详情。</p>
         </div>
       </div>
 
       <div class="manifest-bar">
         <span id="selected-summary" class="summary">已选 0 篇</span>
-        <button id="save-manifest-btn" class="primary" disabled>生成下载清单</button>
+        <button id="save-manifest-btn" class="primary" disabled data-i18n="save_manifest">生成下载清单</button>
         <button id="export-list-btn" class="secondary" disabled
-                title="把当前任务清单保存为文件（任务清单-期刊名.json，重名自动加序号），并通过浏览器下载">
+                title="把当前任务清单保存为文件（任务清单-期刊名.json，重名自动加序号），并通过浏览器下载"
+                data-i18n="export_list" data-i18n-title="export_list_tip">
           保存任务清单
         </button>
         <span id="manifest-msg" class="hint"></span>
@@ -60,58 +68,58 @@
 
     <!-- 模块二：扫盘与下载 -->
     <section class="card">
-      <h2>扫盘与下载</h2>
+      <h2 data-i18n="scan_title">扫盘与下载</h2>
       <div class="settings-grid">
         <label class="field">
-          <span>本地目录</span>
+          <span data-i18n="local_root">本地目录</span>
           <input type="text" id="local-root" placeholder="/mnt/d/paper" value="papers" />
         </label>
       </div>
-      <p class="hint">
+      <p class="hint" data-i18n-html="local_root_hint_html">
         下载将在本地目录下按 <code>期刊名/出版卷/文章名/</code> 逐级生成子文件夹；PDF 以 DOI 尾缀命名（如
         <code>2025JC023188.pdf</code>），并同时生成同名 <code>.txt</code> 信息文件（标题、日期、作者、DOI 等）。
       </p>
       <div class="strategy-setting">
-        <span class="field-label">浏览器选择（下载由浏览器自动化完成，按所选浏览器启动）</span>
+        <span class="field-label" data-i18n="browser_label">浏览器选择（下载由浏览器自动化完成，按所选浏览器启动）</span>
         <select id="browser-select" class="browser-select">
-          <option value="edge" selected>Edge（默认，通过反爬验证率最高）</option>
-          <option value="auto">自动（优先本机 Chrome / Edge / 内置 Chromium）</option>
+          <option value="edge" selected data-i18n="opt_edge">Edge（默认，通过反爬验证率最高）</option>
+          <option value="auto" data-i18n="opt_auto">自动（优先本机 Chrome / Edge / 内置 Chromium）</option>
           <option value="chrome">Chrome</option>
-          <option value="firefox">Firefox（易被 Cloudflare 识别，不推荐）</option>
-          <option value="safari">Safari（WebKit 引擎）</option>
+          <option value="firefox" data-i18n="opt_firefox">Firefox（易被 Cloudflare 识别，不推荐）</option>
+          <option value="safari" data-i18n="opt_safari">Safari（WebKit 引擎）</option>
         </select>
-        <p class="hint">
+        <p class="hint" data-i18n-html="browser_hint_html">
           Firefox / Safari 由 Playwright 的 Firefox / WebKit 引擎驱动，未安装时先执行
           <code>python -m playwright install firefox</code> 或 <code>python -m playwright install webkit</code>。
         </p>
       </div>
       <div class="settings-grid">
         <label class="field">
-          <span>每页等待时间（分钟）</span>
+          <span data-i18n="wait_min">每页等待时间（分钟）</span>
           <input type="text" id="wait-min" value="2" inputmode="numeric" />
         </label>
         <label class="field">
-          <span>无响应最大刷新次数</span>
+          <span data-i18n="max_refresh">无响应最大刷新次数</span>
           <input type="text" id="max-refresh" value="2" inputmode="numeric" />
         </label>
         <label class="field">
-          <span>验证点击间隔（秒）</span>
+          <span data-i18n="verify_interval">验证点击间隔（秒）</span>
           <input type="text" id="verify-interval" value="5" inputmode="numeric" />
         </label>
         <label class="field">
-          <span>验证失败几次后刷新</span>
+          <span data-i18n="verify_max_fails">验证失败几次后刷新</span>
           <input type="text" id="verify-max-fails" value="5" inputmode="numeric" />
         </label>
         <label class="field">
-          <span>任务间隔（秒）</span>
+          <span data-i18n="task_interval">任务间隔（秒）</span>
           <input type="text" id="task-interval" value="5" inputmode="numeric" />
         </label>
         <label class="field checkbox-field">
-          <span>生成信息文件</span>
+          <span data-i18n="gen_info">生成信息文件</span>
           <input type="checkbox" id="gen-info" checked />
         </label>
       </div>
-      <p class="hint">
+      <p class="hint" data-i18n="auto_hint">
         浏览器自动化会打开真实浏览器窗口：等待时间内无下载响应会自动刷新（超过刷新次数后跳过该篇）；
         遇到人机验证时每“验证点击间隔”秒自动模拟点击一次验证，连续“验证失败几次后刷新”次未通过会刷新页面重新验证
         （这些时间都算在每页等待时间内）；遇到登录身份验证时页面保持打开，等待你在浏览器中手动处理后自动继续。
@@ -123,30 +131,35 @@
           id="import-path"
           class="import-path"
           placeholder="输入任务清单文件路径后导入，如 /mnt/d/paper/任务清单-Nature.json（相对路径按网站根目录解析）"
+          data-i18n-placeholder="import_ph"
           autocomplete="off"
         />
-        <button id="import-btn" class="secondary" title="按路径载入任务清单，并设为当前待执行清单">导入任务清单</button>
+        <button id="import-btn" class="secondary" title="按路径载入任务清单，并设为当前待执行清单"
+                data-i18n="import_list" data-i18n-title="import_list_tip">导入任务清单</button>
         <button id="undone-btn" class="secondary" disabled
-                title="按本地目录扫盘结果，把当前清单里未下载的条目生成为新的任务清单并自动切换使用">
+                title="按本地目录扫盘结果，把当前清单里未下载的条目生成为新的任务清单并自动切换使用"
+                data-i18n="gen_undone" data-i18n-title="gen_undone_tip">
           生成未下载清单
         </button>
         <button id="save-list-btn" class="secondary" disabled
-                title="把当前待执行的任务清单保存为文件（任务清单-期刊名.json，重名自动加序号）">
+                title="把当前待执行的任务清单保存为文件（任务清单-期刊名.json，重名自动加序号）"
+                data-i18n="export_list" data-i18n-title="save_list_tip">
           保存任务清单
         </button>
         <span id="list-msg" class="hint"></span>
       </div>
-      <p class="hint">
+      <p class="hint" data-i18n="list_persist_hint">
         网站打开时自动使用上次任务所用清单；在上方“文献检索”生成清单、此处导入清单或生成未下载清单后，
         当前待执行清单会自动切换并持久化（清单内显示文件路径）。
       </p>
       <div class="download-bar">
-        <button id="scan-btn" class="secondary">扫描本地目录</button>
-        <button id="refresh-btn" class="secondary" title="保留当前设置（保存目录等），重置下载状态并重新扫盘">⟳ 刷新</button>
-        <button id="fetch-btn" class="primary" disabled>下载缺失文件</button>
-        <button id="stop-btn" class="secondary hidden">停止下载</button>
-        <button id="resume-btn" class="primary hidden">继续下载</button>
-        <button id="open-dir-btn" class="secondary" disabled>打开本地目录</button>
+        <button id="scan-btn" class="secondary" data-i18n="scan_local">扫描本地目录</button>
+        <button id="refresh-btn" class="secondary" title="保留当前设置（保存目录等），重置下载状态并重新扫盘"
+                data-i18n="refresh" data-i18n-title="refresh_tip">⟳ 刷新</button>
+        <button id="fetch-btn" class="primary" disabled data-i18n="fetch_missing">下载缺失文件</button>
+        <button id="stop-btn" class="secondary hidden" data-i18n="stop_download">停止下载</button>
+        <button id="resume-btn" class="primary hidden" data-i18n="resume_download">继续下载</button>
+        <button id="open-dir-btn" class="secondary" disabled data-i18n="open_dir">打开本地目录</button>
         <span id="scan-summary" class="summary"></span>
       </div>
       <ul id="scan-list" class="download-list"></ul>
@@ -154,17 +167,19 @@
   </main>
 
   <footer class="app-footer">
-    <p>浏览器自动化只在出版商页面模拟正常的人工下载操作，不会绕过付费墙或验证机制。</p>
+    <p data-i18n="footer_note">浏览器自动化只在出版商页面模拟正常的人工下载操作，不会绕过付费墙或验证机制。</p>
   </footer>
 
   <!-- 浏览器自动化人工干预横幅（检测到登录/验证时显示） -->
   <div id="auth-banner" class="auth-banner hidden">
     <span id="auth-banner-text" class="auth-text"></span>
-    <button id="auth-done-btn" class="secondary">我已完成验证，继续等待</button>
-    <button id="auth-reload-btn" class="secondary" title="验证页卡死/循环时刷新页面重试">刷新验证页</button>
-    <button id="auth-skip-btn" class="secondary">跳过此篇</button>
+    <button id="auth-done-btn" class="secondary" data-i18n="auth_done">我已完成验证，继续等待</button>
+    <button id="auth-reload-btn" class="secondary" title="验证页卡死/循环时刷新页面重试"
+            data-i18n="auth_reload" data-i18n-title="auth_reload_tip">刷新验证页</button>
+    <button id="auth-skip-btn" class="secondary" data-i18n="auth_skip">跳过此篇</button>
   </div>
 
+  <script src="i18n.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

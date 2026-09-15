@@ -49,7 +49,7 @@ async function api(pathname, body, method = "POST") {
     headers: body ? { "Content-Type": "application/json" } : undefined,
     body: body ? JSON.stringify(body) : undefined,
   });
-  const data = await resp.json().catch(() => ({ error: "服务器返回异常" }));
+  const data = await resp.json().catch(() => ({ error: t("err_api") }));
   if (!resp.ok && data.ok !== false) data.ok = false;
   return data;
 }
@@ -76,8 +76,8 @@ function addUrlRow(value = "") {
   row.className = "url-row";
   row.innerHTML = `
     <input type="text" class="journal-url-input" value="${escapeHtml(value)}"
-           placeholder="期刊网址，如 https://www.nature.com/ngeo/" autocomplete="off" />
-    <button type="button" class="secondary row-remove" title="删除该行">×</button>
+           placeholder="${escapeHtml(t("url_input_ph_short"))}" autocomplete="off" />
+    <button type="button" class="secondary row-remove" title="${escapeHtml(t("remove_row"))}">×</button>
   `;
   row.querySelector(".row-remove").addEventListener("click", () => {
     if (rows.children.length > 1) row.remove();
@@ -110,19 +110,19 @@ async function onSearchAll() {
   btn.disabled = true;
   const msg = $("#journal-msg");
   for (const [i, url] of urls.entries()) {
-    btn.textContent = `解析中 ${i + 1}/${urls.length}…`;
+    btn.textContent = t("resolving", { i: i + 1, n: urls.length });
     try {
       const r = await api("/api/journal", { url });
-      if (!r.ok) throw new Error(r.error || "解析失败");
+      if (!r.ok) throw new Error(r.error || t("parse_fail"));
       if (!getJournal(r.journal.issn)) {
         state.journals.push(newJournalState(r.journal));
       }
     } catch (err) {
-      msg.textContent = `「${url}」解析失败：${err.message}`;
+      msg.textContent = t("parse_fail_for", { url, msg: err.message });
     }
   }
   btn.disabled = false;
-  btn.textContent = "检索期刊";
+  btn.textContent = t("search_journals");
   $("#browse-area").classList.toggle("hidden", !state.journals.length);
   renderTree();
 }
@@ -161,7 +161,7 @@ function totalSelectedCount() {
 
 function updateSelectedSummary() {
   const n = totalSelectedCount();
-  $("#selected-summary").textContent = `已选 ${n} 篇`;
+  $("#selected-summary").textContent = t("selected_count", { n });
   $("#save-manifest-btn").disabled = n === 0;
 }
 
@@ -182,11 +182,14 @@ function renderTree() {
       j.volumes.length > 0 && j.volumes.every((v) => j.selectedVolumes.has(v.key));
     const head = document.createElement("div");
     head.className = "tree-node root";
+    let countText = t("count_pcs", { sel, total: journalTotal(j) });
+    if (j.scan.done) countText += t("root_volumes_suffix", { n: j.volumes.length });
+    else if (j.scan.loaded) countText += t("root_scanned_suffix", { n: j.scan.loaded });
     head.innerHTML = `
       <span class="caret">${j.expanded ? "▾" : "▸"}</span>
       <input type="checkbox" class="journal-check" ${allVolumesSelected ? "checked" : ""} />
-      <span class="root-title" title="点击展开/收起卷目录">${escapeHtml(j.title)}</span>
-      <span class="count">${sel} / ${journalTotal(j)} 篇${j.scan.done ? `，共 ${j.volumes.length} 卷` : j.scan.loaded ? `（已扫描 ${j.scan.loaded}）` : ""}</span>
+      <span class="root-title" title="${escapeHtml(t("root_title_tip"))}">${escapeHtml(j.title)}</span>
+      <span class="count">${countText}</span>
     `;
     jEl.appendChild(head);
 
@@ -210,7 +213,7 @@ function renderTree() {
       body.className = "tree-children";
 
       if (!j.volumesLoaded) {
-        body.innerHTML = '<p class="empty">卷目录加载中…</p>';
+        body.innerHTML = '<p class="empty">' + t("vol_loading") + "</p>";
       } else {
         for (const vol of j.volumes) {
           body.appendChild(renderVolumeNode(j, vol));
@@ -218,9 +221,9 @@ function renderTree() {
         const status = document.createElement("div");
         status.className = "load-bar";
         if (j.scan.done) {
-          status.innerHTML = `<span class="hint">共 ${j.volumes.length} 卷，已扫描 ${j.scan.loaded} 篇文献</span>`;
+          status.innerHTML = `<span class="hint">${t("scan_done_bar", { n: j.volumes.length, m: j.scan.loaded })}</span>`;
         } else {
-          status.innerHTML = `<span class="hint">卷目录检索中：已扫描 ${j.scan.loaded} / 约 ${j.scan.total} 篇（再点击期刊名可收起并暂停）</span>`;
+          status.innerHTML = `<span class="hint">${t("scan_progress_bar", { loaded: j.scan.loaded, total: j.scan.total })}</span>`;
         }
         body.appendChild(status);
       }
@@ -244,8 +247,8 @@ function renderVolumeNode(j, vol) {
   head.innerHTML = `
     <span class="caret">${isOpen ? "▾" : "▸"}</span>
     <input type="checkbox" class="vol-check" ${allChecked ? "checked" : ""} />
-    <span class="vol-label" title="点击加载/收起该卷文献">${escapeHtml(vol.label)}</span>
-    <span class="count">${selCount} / ${vol.count} 篇</span>
+    <span class="vol-label" title="${escapeHtml(t("vol_label_tip"))}">${escapeHtml(vol.label)}</span>
+    <span class="count">${t("count_pcs", { sel: selCount, total: vol.count })}</span>
   `;
   el.appendChild(head);
 
@@ -269,7 +272,7 @@ function renderVolumeNode(j, vol) {
     const children = document.createElement("div");
     children.className = "tree-children";
     if (!volWorks.length) {
-      children.innerHTML = '<p class="empty">文献加载中…</p>';
+      children.innerHTML = '<p class="empty">' + t("works_loading") + "</p>";
     } else {
       for (const work of volWorks) {
         children.appendChild(renderArticleNode(j, vol.key, work));
@@ -277,7 +280,7 @@ function renderVolumeNode(j, vol) {
       if (!j.scan.done) {
         const note = document.createElement("p");
         note.className = "empty";
-        note.textContent = "期刊卷目录仍在检索中，该卷文献可能不全（稍候自动补全）。";
+        note.textContent = t("vol_incomplete");
         children.appendChild(note);
       }
     }
@@ -343,14 +346,14 @@ async function scanVolumesToDone(j) {
   try {
     do {
       const r = await api("/api/volumes", { issn: j.issn, more: j.volumesLoaded });
-      if (!r.ok) throw new Error(r.error || "卷目录加载失败");
+      if (!r.ok) throw new Error(r.error || t("vol_load_fail"));
       j.volumes = r.volumes;
       j.volumesLoaded = true;
       j.scan = r.scan;
       renderTree();
     } while (j.expanded && !j.scan.done);
   } catch (err) {
-    $("#journal-msg").textContent = `「${j.title}」卷目录加载失败：${err.message}`;
+    $("#journal-msg").textContent = t("vol_load_fail_for", { t: j.title, msg: err.message });
   } finally {
     j.loading = false;
     renderTree();
@@ -370,11 +373,11 @@ async function toggleVolume(j, vol) {
   if (!j.volumeWorks.has(vol.key)) {
     try {
       const r = await api("/api/volume-works", { issn: j.issn, volumeKey: vol.key });
-      if (!r.ok) throw new Error(r.error || "文献加载失败");
+      if (!r.ok) throw new Error(r.error || t("works_load_fail"));
       j.volumeWorks.set(vol.key, r.works);
       vol.count = r.works.length;
     } catch (err) {
-      $("#journal-msg").textContent = `「${vol.label}」文献加载失败：${err.message}`;
+      $("#journal-msg").textContent = t("works_load_fail_for", { t: vol.label, msg: err.message });
     }
     renderTree();
   }
@@ -387,7 +390,7 @@ async function toggleVolume(j, vol) {
 function renderDetail() {
   const pane = $("#detail-pane");
   if (!state.detail) {
-    pane.innerHTML = '<p class="empty">点击文章标题，在此查看详情。</p>';
+    pane.innerHTML = '<p class="empty">' + t("detail_empty") + "</p>";
     return;
   }
   const j = getJournal(state.detail.issn);
@@ -397,15 +400,15 @@ function renderDetail() {
   pane.innerHTML = `
     <h3>${escapeHtml(work.title || work.doi)}</h3>
     <dl>
-      <dt>日期</dt><dd>${escapeHtml(work.date || "未知")}</dd>
-      <dt>作者</dt><dd>${escapeHtml((work.authors || []).join(", ") || "未知")}</dd>
-      <dt>DOI</dt><dd>${escapeHtml(work.doi || "无")}</dd>
-      <dt>期刊</dt><dd>${escapeHtml((j && j.title) || work.journal || "")}</dd>
-      <dt>卷 / 期</dt><dd>${escapeHtml([work.volume && "Volume " + work.volume, work.issue && "Issue " + work.issue].filter(Boolean).join(" / ") || "无")}</dd>
-      <dt>链接</dt><dd><a href="${escapeHtml(work.url || "https://doi.org/" + work.doi)}" target="_blank" rel="noopener">${escapeHtml(work.url || "https://doi.org/" + work.doi)}</a></dd>
+      <dt>${t("dt_date")}</dt><dd>${escapeHtml(work.date || t("unknown"))}</dd>
+      <dt>${t("dt_authors")}</dt><dd>${escapeHtml((work.authors || []).join(", ") || t("unknown"))}</dd>
+      <dt>DOI</dt><dd>${escapeHtml(work.doi || t("none"))}</dd>
+      <dt>${t("dt_journal")}</dt><dd>${escapeHtml((j && j.title) || work.journal || "")}</dd>
+      <dt>${t("dt_vol_issue")}</dt><dd>${escapeHtml([work.volume && t("vol_n", { n: work.volume }), work.issue && t("issue_n", { n: work.issue })].filter(Boolean).join(" / ") || t("none"))}</dd>
+      <dt>${t("dt_link")}</dt><dd><a href="${escapeHtml(work.url || "https://doi.org/" + work.doi)}" target="_blank" rel="noopener">${escapeHtml(work.url || "https://doi.org/" + work.doi)}</a></dd>
     </dl>
     <label class="detail-check">
-      <input type="checkbox" id="detail-check" ${checked ? "checked" : ""} /> 加入下载清单
+      <input type="checkbox" id="detail-check" ${checked ? "checked" : ""} /> ${t("add_to_manifest")}
     </label>
   `;
   $("#detail-check").addEventListener("change", (e) => {
@@ -452,22 +455,22 @@ async function saveManifest() {
       const sel = selections.find((s) => s.issn === j.issn);
       if (!sel) continue;
       while (!j.scan.done) {
-        msg.textContent = `清单准备中：《${j.title}》文献检索 ${j.scan.loaded} / 约 ${j.scan.total} 篇…`;
+        msg.textContent = t("manifest_preparing", { t: j.title, loaded: j.scan.loaded, total: j.scan.total });
         const r = await api("/api/volumes", { issn: j.issn, more: true });
-        if (!r.ok) throw new Error(r.error || "文献检索失败");
+        if (!r.ok) throw new Error(r.error || t("retrieve_fail"));
         j.volumes = r.volumes;
         j.volumesLoaded = true;
         j.scan = r.scan;
       }
-      msg.textContent = `清单准备中：《${j.title}》已完整检索（${j.scan.loaded} 篇），正在汇总…`;
+      msg.textContent = t("manifest_prepared", { t: j.title, n: j.scan.loaded });
     }
-    msg.textContent = "正在生成清单…";
+    msg.textContent = t("manifest_generating");
     const r = await api("/api/manifest/save", { selections });
-    if (!r.ok) throw new Error(r.error || "保存失败");
-    msg.textContent = `✔ 清单已缓存（${r.count} 篇），请到下方“扫盘与下载”模块操作。`;
+    if (!r.ok) throw new Error(r.error || t("save_failed"));
+    msg.textContent = t("manifest_cached", { n: r.count });
     await refreshManifestInfo();
   } catch (err) {
-    msg.textContent = "保存失败：" + err.message;
+    msg.textContent = t("save_fail_prefix") + err.message;
   } finally {
     updateSelectedSummary();
   }
@@ -610,7 +613,7 @@ async function pollFetchStatus() {
     const li = statusEntryIndex !== null ? $("#scan-" + statusEntryIndex) : null;
     const detail = li && li.querySelector(".dl-detail");
     if (detail && st.message) {
-      detail.textContent = "浏览器自动化：" + st.message;
+      detail.textContent = t("ba_status") + st.message;
     }
     if (st.state === "auth") {
       showAuthBanner(st.message);
@@ -645,7 +648,7 @@ async function onSkipCurrent() {
 async function onAuthReload() {
   try {
     const r = await api("/api/fetch-reload", {});
-    if (!r.ok) $("#auth-banner-text").textContent = r.error || "刷新失败";
+    if (!r.ok) $("#auth-banner-text").textContent = r.error || t("reload_failed");
   } catch { /* 忽略 */ }
 }
 
@@ -663,16 +666,16 @@ async function refreshManifestInfo() {
   $("#export-list-btn").disabled = !hasItems;
   if (!hasItems) {
     box.classList.remove("hidden");
-    box.innerHTML = '<span class="hint">当前没有任务清单，请先生成或导入。</span>';
+    box.innerHTML = '<span class="hint">' + t("no_manifest") + "</span>";
     return;
   }
-  const names = (manifest.journals || []).join("、") || "未知期刊";
-  const t = manifest.updatedAt ? new Date(manifest.updatedAt).toLocaleString() : "";
-  const source = manifest.source === "undone" ? " ｜ 来源：未下载清单" : "";
+  const names = (manifest.journals || []).join(t("journal_sep")) || t("unknown_journal");
+  const updatedText = manifest.updatedAt ? new Date(manifest.updatedAt).toLocaleString() : "";
+  const source = manifest.source === "undone" ? t("from_undone") : "";
   box.classList.remove("hidden");
   box.innerHTML =
-    `当前待执行任务清单：<b>${escapeHtml(names)}</b> ｜ ${manifest.items.length} 篇 ｜ 生成于 ${escapeHtml(t)}${source}` +
-    (r.path ? ` ｜ 文件: <span class="list-path">${escapeHtml(r.path)}</span>` : "");
+    `${t("active_list_label")}<b>${escapeHtml(names)}</b>${t("list_count_part", { n: manifest.items.length })}${t("generated_at", { t: escapeHtml(updatedText) })}${source}` +
+    (r.path ? `${t("file_label")}<span class="list-path">${escapeHtml(r.path)}</span>` : "");
 }
 
 let scanResult = null;
@@ -700,22 +703,22 @@ async function onExportList() {
   btn.disabled = true;
   try {
     const r = await api("/api/list/save", {});
-    if (!r.ok) throw new Error(r.error || "保存失败");
+    if (!r.ok) throw new Error(r.error || t("save_failed"));
     // 以保存时的文件名（含防重序号）触发浏览器下载一份
     const m = await api("/api/manifest", null, "GET");
-    if (!m.ok) throw new Error(m.error || "读取清单失败");
+    if (!m.ok) throw new Error(m.error || t("read_manifest_fail"));
     const blob = new Blob([JSON.stringify(m.manifest, null, 2)], { type: "application/json" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = String(r.path || "任务清单.json").split(/[\\/]/).pop();
+    a.download = String(r.path || t("list_default_filename")).split(/[\\/]/).pop();
     document.body.appendChild(a);
     a.click();
     a.remove();
     setTimeout(() => URL.revokeObjectURL(url), 1000);
-    msg.textContent = `✔ 任务清单已保存（${r.count} 篇）：${r.path}，并已通过浏览器下载`;
+    msg.textContent = t("export_ok", { n: r.count, p: r.path });
   } catch (err) {
-    msg.textContent = "保存任务清单失败：" + err.message;
+    msg.textContent = t("export_fail") + err.message;
   } finally {
     btn.disabled = false;
     refreshManifestInfo();
@@ -728,11 +731,11 @@ async function onSaveList() {
   btn.disabled = true;
   try {
     const r = await api("/api/list/save", {});
-    if (!r.ok) throw new Error(r.error || "保存失败");
-    $("#list-msg").textContent = `✔ 当前任务清单已保存（${r.count} 篇）：${r.path}`;
+    if (!r.ok) throw new Error(r.error || t("save_failed"));
+    $("#list-msg").textContent = t("save_list_ok", { n: r.count, p: r.path });
     refreshManifestInfo();
   } catch (err) {
-    $("#list-msg").textContent = "保存任务清单失败：" + err.message;
+    $("#list-msg").textContent = t("export_fail") + err.message;
   } finally {
     btn.disabled = false;
   }
@@ -742,21 +745,21 @@ async function onSaveList() {
 async function onImportList() {
   const p = $("#import-path").value.trim();
   if (!p) {
-    $("#list-msg").textContent = "请先输入任务清单文件路径";
+    $("#list-msg").textContent = t("import_path_empty");
     return;
   }
   const btn = $("#import-btn");
   btn.disabled = true;
   try {
     const r = await api("/api/list/import", { path: p });
-    if (!r.ok) throw new Error(r.error || "导入失败");
-    $("#list-msg").textContent = `✔ 已导入任务清单（${r.count} 篇）并设为当前清单：${r.path}`;
+    if (!r.ok) throw new Error(r.error || t("import_failed"));
+    $("#list-msg").textContent = t("import_ok", { n: r.count, p: r.path });
     $("#import-path").value = r.path; // 回填绝对路径，便于核对
     resetScanState();
     await refreshManifestInfo();
     await onScan();
   } catch (err) {
-    $("#list-msg").textContent = "导入任务清单失败：" + err.message;
+    $("#list-msg").textContent = t("import_fail") + err.message;
   } finally {
     btn.disabled = false;
   }
@@ -766,25 +769,25 @@ async function onImportList() {
 async function onGenUndone() {
   const root = $("#local-root").value.trim();
   if (!root) {
-    $("#list-msg").textContent = "请先填写本地目录";
+    $("#list-msg").textContent = t("root_empty");
     return;
   }
   const btn = $("#undone-btn");
   btn.disabled = true;
   try {
     const r = await api("/api/list/undone", { root });
-    if (!r.ok) throw new Error(r.error || "生成失败");
+    if (!r.ok) throw new Error(r.error || t("gen_failed"));
     if (r.count === 0) {
-      $("#list-msg").textContent = r.message || "清单内文献均已下载，未下载清单为空";
+      $("#list-msg").textContent = r.message || t("all_downloaded");
       return;
     }
     $("#list-msg").textContent =
-      `✔ 未下载清单已生成并设为当前任务清单（缺失 ${r.count} 篇，已下载 ${r.exists} 篇）：${r.path}`;
+      t("undone_ok", { missing: r.count, exists: r.exists, p: r.path });
     resetScanState();
     await refreshManifestInfo();
     await onScan(); // 用新清单重新扫盘，界面即切换为未下载任务
   } catch (err) {
-    $("#list-msg").textContent = "生成未下载清单失败：" + err.message;
+    $("#list-msg").textContent = t("undone_fail") + err.message;
   } finally {
     btn.disabled = false;
   }
@@ -795,26 +798,26 @@ async function onScan() {
   if (!root) return;
   const btn = $("#scan-btn");
   btn.disabled = true;
-  btn.textContent = "扫描中…";
+  btn.textContent = t("scanning");
   try {
     const r = await api("/api/scan", { root });
-    if (!r.ok) throw new Error(r.error || "扫描失败");
+    if (!r.ok) throw new Error(r.error || t("scan_failed"));
     scanResult = r;
     dlSession = null;
     setDownloadButtons("idle");
     renderScanList();
     $("#scan-summary").textContent =
       r.total === 0
-        ? "清单为空，请先生成下载清单"
-        : `清单 ${r.total} 篇：已存在 ${r.exists} 篇，缺失 ${r.missing} 篇`;
+        ? t("manifest_empty")
+        : t("scan_summary", { n: r.total, e: r.exists, m: r.missing });
     $("#fetch-btn").disabled = r.missing === 0;
     $("#undone-btn").disabled = r.total === 0; // 扫盘后可按缺失条目生成未下载清单
     $("#open-dir-btn").disabled = false;
   } catch (err) {
-    $("#scan-summary").textContent = "扫描失败：" + err.message;
+    $("#scan-summary").textContent = t("scan_fail_prefix") + err.message;
   } finally {
     btn.disabled = false;
-    btn.textContent = "扫描本地目录";
+    btn.textContent = t("scan_local");
   }
 }
 
@@ -827,12 +830,12 @@ function renderScanList() {
     li.className = "download-item";
     li.id = "scan-" + i;
     const status = entry.pdfExists
-      ? '<span class="status ok">✔ 已存在</span>'
-      : '<span class="status pending">✘ 缺失</span>';
+      ? `<span class="status ok">${t("st_exists")}</span>`
+      : `<span class="status pending">${t("st_missing")}</span>`;
     const txtNote = entry.pdfExists
       ? entry.txtExists
-        ? "（含信息文件）"
-        : "（缺信息文件，重新下载时会重新生成）"
+        ? t("with_txt")
+        : t("without_txt")
       : "";
     li.innerHTML = `
       ${status}
@@ -892,9 +895,9 @@ async function runDownloadLoop() {
     if (s.stopped) break;
     const entry = s.entries[s.idx];
     const li = $("#scan-" + entry.index);
-    if (li) li.querySelector(".status").outerHTML = '<span class="status pending">⏳ 下载中</span>';
+    if (li) li.querySelector(".status").outerHTML = `<span class="status pending">${t("st_downloading")}</span>`;
     $("#scan-summary").textContent =
-      `下载中… 第 ${s.idx + 1} / ${s.entries.length} 篇（成功 ${s.ok}，失败 ${s.fail}）`;
+      t("downloading_n", { i: s.idx + 1, n: s.entries.length, ok: s.ok, fail: s.fail });
     const item = s.manifestItems[entry.index] || { doi: entry.doi, title: entry.title };
     startStatusPolling(entry.index);
     try {
@@ -912,16 +915,16 @@ async function runDownloadLoop() {
       if (r.ok) {
         s.ok += 1;
         if (li) {
-          li.querySelector(".status").outerHTML = '<span class="status ok">✔ 成功</span>';
+          li.querySelector(".status").outerHTML = `<span class="status ok">${t("st_ok")}</span>`;
           li.querySelector(".dl-detail").textContent =
-            "［浏览器自动化］" + r.path + (r.info_path ? "（信息文件: " + r.info_path + "）" : "");
+            t("ba_prefix") + r.path + (r.info_path ? t("info_file_suffix", { p: r.info_path }) : "");
         }
       } else {
         if (s.stopped) break; // 停止导致的错误不计入失败
         s.fail += 1;
         if (li) {
-          li.querySelector(".status").outerHTML = '<span class="status fail">✘ 失败</span>';
-          li.querySelector(".dl-detail").textContent = r.error || "未知错误";
+          li.querySelector(".status").outerHTML = `<span class="status fail">${t("st_fail")}</span>`;
+          li.querySelector(".dl-detail").textContent = r.error || t("unknown_error");
         }
       }
     } catch (err) {
@@ -929,15 +932,15 @@ async function runDownloadLoop() {
       if (s.stopped) break;
       s.fail += 1;
       if (li) {
-        li.querySelector(".status").outerHTML = '<span class="status fail">✘ 失败</span>';
-        li.querySelector(".dl-detail").textContent =
-          "网络错误（连接中断或服务未响应）：" + err.message;
+        li.querySelector(".status").outerHTML = `<span class="status fail">${t("st_fail")}</span>`;
+          li.querySelector(".dl-detail").textContent =
+            t("net_error") + err.message;
       }
     }
     // 任务间隔：防止请求过密被网站判定为恶意行为
     if (opts.intervalSec > 0 && s.idx < s.entries.length - 1 && !s.stopped) {
       $("#scan-summary").textContent =
-        `任务间隔中（${opts.intervalSec} 秒）… 已完成 ${s.ok + s.fail} / ${s.entries.length} 篇`;
+        t("interval_wait", { s: opts.intervalSec, done: s.ok + s.fail, n: s.entries.length });
       for (let t = 0; t < opts.intervalSec * 4 && !s.stopped; t++) {
         await sleep(250);
       }
@@ -949,14 +952,14 @@ async function runDownloadLoop() {
     // 被中断的条目：服务端已删除停止前的半成品，继续时从该条目重新下载
     const li = $("#scan-" + s.entries[Math.min(s.idx, s.entries.length - 1)].index);
     if (li && s.idx < s.entries.length) {
-      li.querySelector(".status").outerHTML = '<span class="status pending">⏸ 已停止</span>';
+      li.querySelector(".status").outerHTML = `<span class="status pending">${t("st_paused")}</span>`;
     }
     $("#scan-summary").textContent =
-      `已停止：完成 ${s.ok + s.fail} / ${s.entries.length} 篇，点“继续下载”从当前条目重新下载`;
+      t("stopped_summary", { done: s.ok + s.fail, n: s.entries.length });
     setDownloadButtons("stopped");
   } else {
     $("#scan-summary").textContent =
-      `下载完成：成功 ${s.ok}，失败 ${s.fail}，跳过已存在 ${scanResult.exists} 篇`;
+      t("done_summary", { ok: s.ok, fail: s.fail, skip: scanResult.exists });
     setDownloadButtons("idle");
     $("#fetch-btn").disabled = true;
   }
@@ -969,7 +972,7 @@ async function onRefresh() {
   dlSession = null;
   scanResult = null;
   $("#scan-list").innerHTML = "";
-  $("#scan-summary").textContent = "已刷新，正在重新扫盘…";
+  $("#scan-summary").textContent = t("refreshed");
   $("#fetch-btn").disabled = true;
   setDownloadButtons("idle");
   refreshManifestInfo();
@@ -979,7 +982,7 @@ async function onRefresh() {
 async function onStopFetch() {
   if (!dlSession || dlSession.stopped) return;
   dlSession.stopped = true;
-  $("#scan-summary").textContent = "正在停止当前下载…";
+  $("#scan-summary").textContent = t("stopping");
   hideAuthBanner();
   try {
     await api("/api/fetch-stop", {});
@@ -1000,9 +1003,9 @@ async function onOpenDir() {
   const dir = $("#local-root").value.trim() || "papers";
   try {
     const r = await api("/api/open-dir", { dir });
-    if (!r.ok) $("#scan-summary").textContent = r.error || "打开目录失败";
+    if (!r.ok) $("#scan-summary").textContent = r.error || t("open_dir_failed");
   } catch (err) {
-    $("#scan-summary").textContent = "打开目录失败：" + err.message;
+    $("#scan-summary").textContent = t("open_dir_fail") + err.message;
   }
 }
 
@@ -1041,6 +1044,28 @@ for (const id of SETTINGS_INPUT_IDS) {
   document.getElementById(id).addEventListener("input", scheduleSettingsSave);
 }
 $("#gen-info").addEventListener("change", scheduleSettingsSave);
+
+// ---------------------------------------------------------------------------
+// 语言切换（中文 / English）：词典与 t() 在 i18n.js，切换后重绘动态内容
+// ---------------------------------------------------------------------------
+
+$("#lang-select").value = currentLang();
+
+function applyLanguage() {
+  applyI18n();
+  updateSelectedSummary();
+  renderTree();
+  renderDetail();
+  refreshManifestInfo();
+  if (scanResult) renderScanList();
+  const scanBtn = $("#scan-btn");
+  if (scanBtn.disabled) scanBtn.textContent = t("scanning"); // 扫盘进行中保持“扫描中…”
+}
+
+$("#lang-select").addEventListener("change", (e) => {
+  setLang(e.target.value);
+  applyLanguage();
+});
 
 loadSettings();
 
