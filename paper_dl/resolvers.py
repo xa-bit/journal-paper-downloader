@@ -1,9 +1,9 @@
-"""Resolver: 将 DOI / arXiv ID / 论文标题解析为可下载的 PDF 地址。
+"""Resolver: 将 DOI / arXiv ID / 论文标题解析为论文元数据与出版商页面地址。
 
-只使用合法的开放获取（Open Access）渠道：
-- Unpaywall: 根据 DOI 查找合法的 OA 全文链接
+使用的公开渠道：
+- Crossref: 按 DOI / 标题检索论文元数据（标题、作者、年份、落地页等）
 - arXiv: 预印本 PDF 直链
-- Crossref: 按标题检索论文元数据（DOI、作者、年份等）
+- 出版商规范 PDF 直链：供浏览器自动化在出版商页面上触发下载
 """
 
 from __future__ import annotations
@@ -14,16 +14,13 @@ from dataclasses import dataclass, field
 import requests
 
 CROSSREF_WORKS_API = "https://api.crossref.org/works"
-UNPAYWALL_API = "https://api.unpaywall.org/v2"
-OPENALEX_API = "https://api.openalex.org/works"
 ARXIV_PDF_URL = "https://arxiv.org/pdf/{arxiv_id}"
-UNPAYWALL_EMAIL = "paper-dl@localhost"
 
 DEFAULT_TIMEOUT = 30
 
 
 class ResolveError(RuntimeError):
-    """解析失败（网络错误、未找到 OA 版本等）。"""
+    """解析失败（网络错误、DOI 不存在等）。"""
 
 
 @dataclass
@@ -45,7 +42,7 @@ class Paper:
         return self.title.strip() or (self.doi or self.arxiv_id or "unknown")
 
     def add_pdf(self, url: str, source: str) -> None:
-        """追加一个 PDF 候选（去重），source ∈ unpaywall/openalex/publisher。"""
+        """追加一个 PDF 候选（去重），source ∈ arxiv/publisher。"""
         if url and url not in self.pdf_urls:
             self.pdf_urls.append(url)
             self.pdf_sources.append(source)
@@ -117,7 +114,7 @@ def resolve_arxiv(arxiv_id: str) -> Paper:
         landing_url=f"https://arxiv.org/abs/{arxiv_id}",
         is_oa=True,
     )
-    paper.add_pdf(ARXIV_PDF_URL.format(arxiv_id=arxiv_id), "unpaywall")
+    paper.add_pdf(ARXIV_PDF_URL.format(arxiv_id=arxiv_id), "arxiv")
     return paper
 
 
@@ -156,32 +153,8 @@ def search_by_title(title: str, rows: int = 5) -> list[Paper]:
     return papers
 
 
-def _openalex_pdf_urls(doi: str) -> list[str]:
-    """OpenAlex 兜底：查找 Unpaywall 未收录的 OA PDF（如机构库副本）。"""
-    try:
-        resp = requests.get(
-            f"{OPENALEX_API}/doi:{doi}",
-            headers={"User-Agent": "journal-paper-downloader/1.0"},
-            timeout=DEFAULT_TIMEOUT,
-        )
-        if resp.status_code != 200:
-            return []
-        data = resp.json()
-    except requests.RequestException:
-        return []
-    urls: list[str] = []
-    best = data.get("best_oa_location") or {}
-    if best.get("pdf_url"):
-        urls.append(best["pdf_url"])
-    for location in data.get("locations") or []:
-        pdf_url = location.get("pdf_url")
-        if pdf_url and pdf_url not in urls:
-            urls.append(pdf_url)
-    return urls
-
-
 def _publisher_pdf_candidates(doi: str) -> list[str]:
-    """出版商页面的规范 PDF 直链（最后兜底；反爬拦截时自动失败，不影响其他来源）。"""
+    """出版商页面的规范 PDF 直链（供浏览器自动化带 Referer 触发下载）。"""
     doi_lower = doi.lower()
     tail = doi.split("/", 1)[-1]
     if doi_lower.startswith("10.1029/"):
@@ -193,53 +166,20 @@ def _publisher_pdf_candidates(doi: str) -> list[str]:
     return []
 
 
-def resolve_doi(doi: str, email: str = UNPAYWALL_EMAIL) -> Paper:
-    """DOI -> Unpaywall（首选）+ OpenAlex（兜底）查找合法的 OA PDF。"""
+def resolve_doi(doi: str) -> Paper:
+    """DOI -> Crossref 元数据（标题/作者/年份/落地页）+ 出版商规范 PDF 直链。"""
     doi = doi.strip().removeprefix("https://doi.org/").removeprefix("http://dx.doi.org/")
     if not doi:
         raise ResolveError("DOI 为空")
 
-    resp = _get(f"{UNPAYWALL_API}/{doi}", params={"email": email})
-    data = resp.json()
+    resp = _get(f"{CROSSREF_WORKS_API}/{doi}")
+    item = resp.json().get("message") or {}
+    paper = _crossref_item_to_paper(item)
+    paper.doi = paper.doi or doi
+    if not paper.title:
+        paper.title = doi
 
-    paper = Paper(
-        title=data.get("title") or doi,
-        doi=data.get("doi") or doi,
-        year=data.get("year"),
-        landing_url=data.get("url_for_landing_page"),
-        is_oa=bool(data.get("is_oa")),
-    )
-    for author in data.get("z_authors") or []:
-        name = " ".join(filter(None, [author.get("given"), author.get("family")]))
-        if not name:
-            name = author.get("raw_author_name") or ""
-        if name:
-            paper.authors.append(name)
-    # 收集所有 OA 位置的 PDF 链接（best 优先），下载时按顺序尝试
-    locations = [data.get("best_oa_location") or {}] + list(data.get("oa_locations") or [])
-    for location in locations:
-        paper.add_pdf(location.get("url_for_pdf"), "unpaywall")
-    if paper.pdf_urls:
-        paper.landing_url = (data.get("best_oa_location") or {}).get("url_for_landing_page") or paper.landing_url
-
-    # Unpaywall 没有 PDF 直链时，用 OpenAlex 兜底（机构库 / 预印本副本等）
-    if not paper.pdf_urls:
-        for pdf_url in _openalex_pdf_urls(doi):
-            paper.add_pdf(pdf_url, "openalex")
-        if paper.pdf_urls:
-            paper.is_oa = True
-
-    # 最后追加出版商规范直链（被反爬拦截时会在下载阶段自动跳过）
+    # 出版商规范直链：浏览器自动化在文章页上带 Referer 触发下载时使用
     for pdf_url in _publisher_pdf_candidates(doi):
         paper.add_pdf(pdf_url, "publisher")
-
-    if not paper.pdf_urls and not paper.is_oa:
-        raise ResolveError(
-            f"论文 {doi} 在 Unpaywall / OpenAlex 中均无开放获取版本。"
-            "出版商页面可能可手动获取（出版商有反爬保护，程序无法直接下载）: "
-            + (paper.landing_url or f"https://doi.org/{doi}")
-        )
-    if not paper.pdf_urls:
-        # OA 但没有 PDF 直链时，回退到落地页
-        paper.landing_url = (data.get("best_oa_location") or {}).get("url_for_landing_page") or paper.landing_url
     return paper

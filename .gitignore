@@ -1,9 +1,14 @@
 # 下载的论文
 papers/
 
-# Web 端下载清单缓存
+# Web 端下载清单缓存与运行状态
 download-manifest.json
 server/cache/
+server/state.json
+
+# 本地任务清单与测试数据
+任务清单-*.json
+test-list.json
 
 # Node
 node_modules/

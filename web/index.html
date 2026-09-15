@@ -9,7 +9,7 @@
 <body>
   <header class="app-header">
     <h1>📄 期刊文献下载器</h1>
-    <p class="subtitle">输入期刊网址检索文献，生成下载清单，扫盘后批量下载开放获取（OA）PDF</p>
+    <p class="subtitle">输入期刊网址检索文献，生成下载清单，扫盘后通过浏览器自动化批量下载 PDF</p>
   </header>
 
   <main class="container">
@@ -50,6 +50,10 @@
       <div class="manifest-bar">
         <span id="selected-summary" class="summary">已选 0 篇</span>
         <button id="save-manifest-btn" class="primary" disabled>生成下载清单</button>
+        <button id="export-list-btn" class="secondary" disabled
+                title="把当前任务清单保存为文件（任务清单-期刊名.json，重名自动加序号），并通过浏览器下载">
+          保存任务清单
+        </button>
         <span id="manifest-msg" class="hint"></span>
       </div>
     </section>
@@ -62,27 +66,41 @@
           <span>本地目录</span>
           <input type="text" id="local-root" placeholder="/mnt/d/paper" value="papers" />
         </label>
-        <label class="field">
-          <span>Unpaywall 邮箱</span>
-          <input type="text" id="email" value="paper-dl@localhost" />
-        </label>
       </div>
       <p class="hint">
         下载将在本地目录下按 <code>期刊名/出版卷/文章名/</code> 逐级生成子文件夹；PDF 以 DOI 尾缀命名（如
         <code>2025JC023188.pdf</code>），并同时生成同名 <code>.txt</code> 信息文件（标题、日期、作者、DOI 等）。
       </p>
       <div class="strategy-setting">
-        <span class="field-label">下载方式排序（从上到下依次尝试，点击 ↑↓ 调整）</span>
-        <ul id="strategy-list" class="strategy-list"></ul>
+        <span class="field-label">浏览器选择（下载由浏览器自动化完成，按所选浏览器启动）</span>
+        <select id="browser-select" class="browser-select">
+          <option value="edge" selected>Edge（默认，通过反爬验证率最高）</option>
+          <option value="auto">自动（优先本机 Chrome / Edge / 内置 Chromium）</option>
+          <option value="chrome">Chrome</option>
+          <option value="firefox">Firefox（易被 Cloudflare 识别，不推荐）</option>
+          <option value="safari">Safari（WebKit 引擎）</option>
+        </select>
+        <p class="hint">
+          Firefox / Safari 由 Playwright 的 Firefox / WebKit 引擎驱动，未安装时先执行
+          <code>python -m playwright install firefox</code> 或 <code>python -m playwright install webkit</code>。
+        </p>
       </div>
       <div class="settings-grid">
         <label class="field">
           <span>每页等待时间（分钟）</span>
-          <input type="text" id="wait-min" value="5" inputmode="numeric" />
+          <input type="text" id="wait-min" value="2" inputmode="numeric" />
         </label>
         <label class="field">
           <span>无响应最大刷新次数</span>
-          <input type="text" id="max-refresh" value="3" inputmode="numeric" />
+          <input type="text" id="max-refresh" value="2" inputmode="numeric" />
+        </label>
+        <label class="field">
+          <span>验证点击间隔（秒）</span>
+          <input type="text" id="verify-interval" value="5" inputmode="numeric" />
+        </label>
+        <label class="field">
+          <span>验证失败几次后刷新</span>
+          <input type="text" id="verify-max-fails" value="5" inputmode="numeric" />
         </label>
         <label class="field">
           <span>任务间隔（秒）</span>
@@ -94,12 +112,37 @@
         </label>
       </div>
       <p class="hint">
-        浏览器自动化会打开真实浏览器窗口：等待时间内无下载响应会自动刷新（超过刷新次数后跳过并尝试下一种方式）；
-        遇到登录 / 人机验证时页面保持打开，等待你在浏览器中手动处理后自动继续。
+        浏览器自动化会打开真实浏览器窗口：等待时间内无下载响应会自动刷新（超过刷新次数后跳过该篇）；
+        遇到人机验证时每“验证点击间隔”秒自动模拟点击一次验证，连续“验证失败几次后刷新”次未通过会刷新页面重新验证
+        （这些时间都算在每页等待时间内）；遇到登录身份验证时页面保持打开，等待你在浏览器中手动处理后自动继续。
       </p>
       <div id="manifest-info" class="manifest-info hidden"></div>
+      <div class="list-bar">
+        <input
+          type="text"
+          id="import-path"
+          class="import-path"
+          placeholder="输入任务清单文件路径后导入，如 /mnt/d/paper/任务清单-Nature.json（相对路径按网站根目录解析）"
+          autocomplete="off"
+        />
+        <button id="import-btn" class="secondary" title="按路径载入任务清单，并设为当前待执行清单">导入任务清单</button>
+        <button id="undone-btn" class="secondary" disabled
+                title="按本地目录扫盘结果，把当前清单里未下载的条目生成为新的任务清单并自动切换使用">
+          生成未下载清单
+        </button>
+        <button id="save-list-btn" class="secondary" disabled
+                title="把当前待执行的任务清单保存为文件（任务清单-期刊名.json，重名自动加序号）">
+          保存任务清单
+        </button>
+        <span id="list-msg" class="hint"></span>
+      </div>
+      <p class="hint">
+        网站打开时自动使用上次任务所用清单；在上方“文献检索”生成清单、此处导入清单或生成未下载清单后，
+        当前待执行清单会自动切换并持久化（清单内显示文件路径）。
+      </p>
       <div class="download-bar">
         <button id="scan-btn" class="secondary">扫描本地目录</button>
+        <button id="refresh-btn" class="secondary" title="保留当前设置（保存目录等），重置下载状态并重新扫盘">⟳ 刷新</button>
         <button id="fetch-btn" class="primary" disabled>下载缺失文件</button>
         <button id="stop-btn" class="secondary hidden">停止下载</button>
         <button id="resume-btn" class="primary hidden">继续下载</button>
@@ -111,13 +154,14 @@
   </main>
 
   <footer class="app-footer">
-    <p>仅下载开放获取文献；付费墙论文会提示通过出版商页面获取，不会绕过付费墙。</p>
+    <p>浏览器自动化只在出版商页面模拟正常的人工下载操作，不会绕过付费墙或验证机制。</p>
   </footer>
 
   <!-- 浏览器自动化人工干预横幅（检测到登录/验证时显示） -->
   <div id="auth-banner" class="auth-banner hidden">
     <span id="auth-banner-text" class="auth-text"></span>
     <button id="auth-done-btn" class="secondary">我已完成验证，继续等待</button>
+    <button id="auth-reload-btn" class="secondary" title="验证页卡死/循环时刷新页面重试">刷新验证页</button>
     <button id="auth-skip-btn" class="secondary">跳过此篇</button>
   </div>
 

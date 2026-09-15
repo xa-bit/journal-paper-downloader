@@ -477,69 +477,112 @@ async function saveManifest() {
 // 模块二：扫盘与下载
 // ---------------------------------------------------------------------------
 
-// 下载方式排序（localStorage 持久化；浏览器自动化为默认首选）
-const STRATEGY_META = {
-  browser: { name: "浏览器自动化", desc: "真实浏览器自动打开出版商页面并下载，可应对反爬（默认首选）" },
-  unpaywall: { name: "Unpaywall OA 直链", desc: "开放获取存档的 PDF 直链，速度最快" },
-  openalex: { name: "OpenAlex 开放副本", desc: "机构库 / 预印本等开放副本" },
-  publisher: { name: "出版商直链", desc: "出版商规范 PDF 链接，常有反爬拦截，易失败" },
-};
-const ALL_STRATEGIES = ["browser", "unpaywall", "openalex", "publisher"];
+// 下载方式：仅浏览器自动化（真实浏览器打开出版商页面、自动通过人机验证并下载 PDF）
+// 浏览器选择（localStorage 持久化；默认 Edge，auto = 依次尝试本机 Chrome / Edge / 内置 Chromium）
+// 说明：Playwright 版 Firefox 极易被 Cloudflare 识别为自动化浏览器导致验证无法通过，
+// 默认使用本机 Edge（真实浏览器内核 + 反检测脚本），通过率最高
+const BROWSER_CHOICES = ["edge", "auto", "chrome", "firefox", "safari"];
 
-function loadStrategies() {
+function loadBrowserChoice() {
   try {
-    const saved = JSON.parse(localStorage.getItem("pdl-strategies"));
-    if (Array.isArray(saved) && saved.length === ALL_STRATEGIES.length &&
-        ALL_STRATEGIES.every((s) => saved.includes(s))) {
-      return saved;
-    }
+    const saved = localStorage.getItem("pdl-browser-v2");
+    if (BROWSER_CHOICES.includes(saved)) return saved;
   } catch { /* 忽略坏数据 */ }
-  return [...ALL_STRATEGIES];
+  return "edge"; // 默认 Edge（真实内核，反检测通过率最高）
 }
 
-let strategies = loadStrategies();
+let browserChoice = loadBrowserChoice();
 
-function saveStrategies() {
-  localStorage.setItem("pdl-strategies", JSON.stringify(strategies));
+function saveBrowserChoice() {
+  localStorage.setItem("pdl-browser-v2", browserChoice);
+  scheduleSettingsSave(); // 同步到服务端，下次打开自动恢复
 }
 
-function renderStrategyList() {
-  const ul = $("#strategy-list");
-  ul.innerHTML = "";
-  strategies.forEach((key, i) => {
-    const meta = STRATEGY_META[key];
-    const li = document.createElement("li");
-    li.innerHTML = `
-      <span class="strategy-order">${i + 1}</span>
-      <span class="strategy-name">${escapeHtml(meta.name)}</span>
-      <span class="strategy-desc">${escapeHtml(meta.desc)}</span>
-      <button type="button" class="secondary st-up" title="上移" ${i === 0 ? "disabled" : ""}>↑</button>
-      <button type="button" class="secondary st-down" title="下移" ${i === strategies.length - 1 ? "disabled" : ""}>↓</button>
-    `;
-    li.querySelector(".st-up").addEventListener("click", () => {
-      [strategies[i - 1], strategies[i]] = [strategies[i], strategies[i - 1]];
-      saveStrategies();
-      renderStrategyList();
-    });
-    li.querySelector(".st-down").addEventListener("click", () => {
-      [strategies[i + 1], strategies[i]] = [strategies[i], strategies[i + 1]];
-      saveStrategies();
-      renderStrategyList();
-    });
-    ul.appendChild(li);
-  });
+// ---------------------------------------------------------------------------
+// 设置持久化（服务端 state.json）：改动即自动保存，下次打开网站自动恢复
+// 上次执行任务时的全部设置（含浏览器选择）
+// ---------------------------------------------------------------------------
+
+const SETTINGS_INPUT_IDS = [
+  "local-root",
+  "wait-min",
+  "max-refresh",
+  "verify-interval",
+  "verify-max-fails",
+  "task-interval",
+];
+
+function collectSettings() {
+  const num = (id) => {
+    const v = parseInt($("#" + id).value, 10);
+    return Number.isFinite(v) ? v : null;
+  };
+  return {
+    root: $("#local-root").value.trim(),
+    waitMinutes: num("wait-min"),
+    maxRefresh: num("max-refresh"),
+    verifyInterval: num("verify-interval"),
+    verifyMaxFails: num("verify-max-fails"),
+    intervalSec: num("task-interval"),
+    genInfo: $("#gen-info").checked,
+    browser: browserChoice,
+  };
 }
 
-/** 读取下载参数（带上下限保护，默认 等待5分钟 / 刷新3次 / 间隔5秒） */
+function applySettings(s) {
+  if (!s || typeof s !== "object") return;
+  if (typeof s.root === "string" && s.root) $("#local-root").value = s.root;
+  const setNum = (id, v) => {
+    if (Number.isFinite(v)) $("#" + id).value = v;
+  };
+  setNum("wait-min", s.waitMinutes);
+  setNum("max-refresh", s.maxRefresh);
+  setNum("verify-interval", s.verifyInterval);
+  setNum("verify-max-fails", s.verifyMaxFails);
+  setNum("task-interval", s.intervalSec);
+  if (typeof s.genInfo === "boolean") $("#gen-info").checked = s.genInfo;
+  if (BROWSER_CHOICES.includes(s.browser)) {
+    browserChoice = s.browser;
+    saveBrowserChoice();
+    $("#browser-select").value = browserChoice;
+  }
+}
+
+let settingsSaveTimer = null;
+
+/** 设置变更后延时自动保存（防抖：连续输入只写一次） */
+function scheduleSettingsSave() {
+  clearTimeout(settingsSaveTimer);
+  settingsSaveTimer = setTimeout(async () => {
+    try {
+      await api("/api/settings", { settings: collectSettings() });
+    } catch {
+      /* 保存失败不阻塞界面 */
+    }
+  }, 800);
+}
+
+async function loadSettings() {
+  try {
+    const r = await api("/api/settings", null, "GET");
+    if (r.ok && r.settings) applySettings(r.settings);
+  } catch {
+    /* 读取失败时沿用默认/localStorage 设置 */
+  }
+}
+
+/** 读取下载参数（带上下限保护，默认 等待2分钟 / 刷新2次 / 验证点击5s / 验证5次失败刷新 / 间隔5秒） */
 function readDownloadOptions() {
   const num = (sel, min, max, def) => {
     const v = parseInt($(sel).value, 10);
     return Number.isFinite(v) ? Math.min(max, Math.max(min, v)) : def;
   };
   return {
-    strategies: [...strategies],
-    waitMinutes: num("#wait-min", 1, 120, 5),
-    maxRefresh: num("#max-refresh", 0, 20, 3),
+    browser: browserChoice,
+    waitMinutes: num("#wait-min", 1, 120, 2),
+    maxRefresh: num("#max-refresh", 0, 20, 2),
+    verifyInterval: num("#verify-interval", 1, 120, 5),
+    verifyMaxFails: num("#verify-max-fails", 1, 50, 5),
     intervalSec: num("#task-interval", 0, 300, 5),
     genInfo: $("#gen-info").checked,
   };
@@ -569,7 +612,11 @@ async function pollFetchStatus() {
     if (detail && st.message) {
       detail.textContent = "浏览器自动化：" + st.message;
     }
-    if (st.state === "auth") showAuthBanner(st.message);
+    if (st.state === "auth") {
+      showAuthBanner(st.message);
+    } else if (!$("#auth-banner").classList.contains("hidden")) {
+      hideAuthBanner(); // 验证已通过或任务状态变化，收起横幅
+    }
   } catch { /* 轮询失败忽略，下个周期重试 */ }
 }
 
@@ -594,6 +641,14 @@ async function onSkipCurrent() {
   hideAuthBanner();
 }
 
+/** 人工刷新当前验证页（Cloudflare 验证页卡死/循环时触发重试）。 */
+async function onAuthReload() {
+  try {
+    const r = await api("/api/fetch-reload", {});
+    if (!r.ok) $("#auth-banner-text").textContent = r.error || "刷新失败";
+  } catch { /* 忽略 */ }
+}
+
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -602,18 +657,138 @@ async function refreshManifestInfo() {
   const r = await api("/api/manifest", null, "GET");
   const box = $("#manifest-info");
   const manifest = r.ok ? r.manifest : null;
-  if (!manifest || !manifest.items || !manifest.items.length) {
+  const hasItems = !!(manifest && manifest.items && manifest.items.length);
+  // 两个板块的“保存任务清单”按钮：有当前清单才可用
+  $("#save-list-btn").disabled = !hasItems;
+  $("#export-list-btn").disabled = !hasItems;
+  if (!hasItems) {
     box.classList.remove("hidden");
-    box.innerHTML = '<span class="hint">当前没有缓存的下载清单，请先在上方生成。</span>';
+    box.innerHTML = '<span class="hint">当前没有任务清单，请先生成或导入。</span>';
     return;
   }
   const names = (manifest.journals || []).join("、") || "未知期刊";
   const t = manifest.updatedAt ? new Date(manifest.updatedAt).toLocaleString() : "";
+  const source = manifest.source === "undone" ? " ｜ 来源：未下载清单" : "";
   box.classList.remove("hidden");
-  box.innerHTML = `当前下载清单：<b>${escapeHtml(names)}</b> ｜ ${manifest.items.length} 篇 ｜ 生成于 ${escapeHtml(t)}`;
+  box.innerHTML =
+    `当前待执行任务清单：<b>${escapeHtml(names)}</b> ｜ ${manifest.items.length} 篇 ｜ 生成于 ${escapeHtml(t)}${source}` +
+    (r.path ? ` ｜ 文件: <span class="list-path">${escapeHtml(r.path)}</span>` : "");
 }
 
 let scanResult = null;
+
+// ---------------------------------------------------------------------------
+// 任务清单操作：保存 / 导入 / 生成未下载清单（当前待执行清单自动切换并持久化）
+// ---------------------------------------------------------------------------
+
+/** 重置扫盘与下载状态：清单切换后旧结果作废 */
+function resetScanState() {
+  stopStatusPolling();
+  hideAuthBanner();
+  dlSession = null;
+  scanResult = null;
+  $("#scan-list").innerHTML = "";
+  $("#scan-summary").textContent = "";
+  $("#fetch-btn").disabled = true;
+  setDownloadButtons("idle");
+}
+
+/** 板块一：保存当前任务清单为文件（重名自动加序号），并通过浏览器下载 */
+async function onExportList() {
+  const btn = $("#export-list-btn");
+  const msg = $("#manifest-msg");
+  btn.disabled = true;
+  try {
+    const r = await api("/api/list/save", {});
+    if (!r.ok) throw new Error(r.error || "保存失败");
+    // 以保存时的文件名（含防重序号）触发浏览器下载一份
+    const m = await api("/api/manifest", null, "GET");
+    if (!m.ok) throw new Error(m.error || "读取清单失败");
+    const blob = new Blob([JSON.stringify(m.manifest, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = String(r.path || "任务清单.json").split(/[\\/]/).pop();
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    msg.textContent = `✔ 任务清单已保存（${r.count} 篇）：${r.path}，并已通过浏览器下载`;
+  } catch (err) {
+    msg.textContent = "保存任务清单失败：" + err.message;
+  } finally {
+    btn.disabled = false;
+    refreshManifestInfo();
+  }
+}
+
+/** 板块二：把当前待执行的任务清单保存为文件（任务清单-期刊名.json，重名自动加序号） */
+async function onSaveList() {
+  const btn = $("#save-list-btn");
+  btn.disabled = true;
+  try {
+    const r = await api("/api/list/save", {});
+    if (!r.ok) throw new Error(r.error || "保存失败");
+    $("#list-msg").textContent = `✔ 当前任务清单已保存（${r.count} 篇）：${r.path}`;
+    refreshManifestInfo();
+  } catch (err) {
+    $("#list-msg").textContent = "保存任务清单失败：" + err.message;
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+/** 板块二：按输入路径导入任务清单，导入后自动切换为当前待执行清单并重新扫盘 */
+async function onImportList() {
+  const p = $("#import-path").value.trim();
+  if (!p) {
+    $("#list-msg").textContent = "请先输入任务清单文件路径";
+    return;
+  }
+  const btn = $("#import-btn");
+  btn.disabled = true;
+  try {
+    const r = await api("/api/list/import", { path: p });
+    if (!r.ok) throw new Error(r.error || "导入失败");
+    $("#list-msg").textContent = `✔ 已导入任务清单（${r.count} 篇）并设为当前清单：${r.path}`;
+    $("#import-path").value = r.path; // 回填绝对路径，便于核对
+    resetScanState();
+    await refreshManifestInfo();
+    await onScan();
+  } catch (err) {
+    $("#list-msg").textContent = "导入任务清单失败：" + err.message;
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+/** 板块二：按扫盘结果生成“未下载清单”（仅含缺失条目），并自动切换为当前待执行清单 */
+async function onGenUndone() {
+  const root = $("#local-root").value.trim();
+  if (!root) {
+    $("#list-msg").textContent = "请先填写本地目录";
+    return;
+  }
+  const btn = $("#undone-btn");
+  btn.disabled = true;
+  try {
+    const r = await api("/api/list/undone", { root });
+    if (!r.ok) throw new Error(r.error || "生成失败");
+    if (r.count === 0) {
+      $("#list-msg").textContent = r.message || "清单内文献均已下载，未下载清单为空";
+      return;
+    }
+    $("#list-msg").textContent =
+      `✔ 未下载清单已生成并设为当前任务清单（缺失 ${r.count} 篇，已下载 ${r.exists} 篇）：${r.path}`;
+    resetScanState();
+    await refreshManifestInfo();
+    await onScan(); // 用新清单重新扫盘，界面即切换为未下载任务
+  } catch (err) {
+    $("#list-msg").textContent = "生成未下载清单失败：" + err.message;
+  } finally {
+    btn.disabled = false;
+  }
+}
 
 async function onScan() {
   const root = $("#local-root").value.trim();
@@ -633,6 +808,7 @@ async function onScan() {
         ? "清单为空，请先生成下载清单"
         : `清单 ${r.total} 篇：已存在 ${r.exists} 篇，缺失 ${r.missing} 篇`;
     $("#fetch-btn").disabled = r.missing === 0;
+    $("#undone-btn").disabled = r.total === 0; // 扫盘后可按缺失条目生成未下载清单
     $("#open-dir-btn").disabled = false;
   } catch (err) {
     $("#scan-summary").textContent = "扫描失败：" + err.message;
@@ -668,14 +844,16 @@ function renderScanList() {
 }
 
 // 下载会话：支持停止 / 继续
-let dlSession = null; // {entries, idx, root, email, manifestItems, ok, fail, stopped}
+let dlSession = null; // {entries, idx, root, options, manifestItems, ok, fail, stopped}
 
 function setDownloadButtons(mode) {
   // mode: idle | running | stopped
   $("#fetch-btn").classList.toggle("hidden", mode !== "idle");
   $("#stop-btn").classList.toggle("hidden", mode !== "running");
   $("#resume-btn").classList.toggle("hidden", mode !== "stopped");
-  $("#scan-btn").disabled = mode !== "idle";
+  // 扫描 / 刷新仅在下載进行中禁用：停止后可重新扫盘、重建待下载任务序列
+  $("#scan-btn").disabled = mode === "running";
+  $("#refresh-btn").disabled = mode === "running";
 }
 
 async function onFetch() {
@@ -686,11 +864,17 @@ async function onFetch() {
   const manifestResp = await api("/api/manifest", null, "GET");
   const manifestItems = (manifestResp.ok && manifestResp.manifest.items) || [];
 
+  // 快照本次执行任务所用设置到服务端：下次打开网站自动恢复
+  try {
+    await api("/api/settings", { settings: collectSettings() });
+  } catch {
+    /* 保存失败不影响下载 */
+  }
+
   dlSession = {
     entries: missing,
     idx: 0,
     root: $("#local-root").value.trim(),
-    email: $("#email").value.trim() || "paper-dl@localhost",
     options: readDownloadOptions(),
     manifestItems,
     ok: 0,
@@ -716,11 +900,12 @@ async function runDownloadLoop() {
     try {
       const r = await api("/api/fetch", {
         root: s.root,
-        email: s.email,
         item,
-        strategies: opts.strategies,
+        browser: opts.browser,
         waitMinutes: opts.waitMinutes,
         maxRefresh: opts.maxRefresh,
+        verifyInterval: opts.verifyInterval,
+        verifyMaxFails: opts.verifyMaxFails,
         genInfo: opts.genInfo,
       });
       stopStatusPolling();
@@ -728,9 +913,8 @@ async function runDownloadLoop() {
         s.ok += 1;
         if (li) {
           li.querySelector(".status").outerHTML = '<span class="status ok">✔ 成功</span>';
-          const via = r.strategy ? `［${escapeHtml(STRATEGY_META[r.strategy].name)}］` : "";
           li.querySelector(".dl-detail").textContent =
-            via + r.path + (r.info_path ? "（信息文件: " + r.info_path + "）" : "");
+            "［浏览器自动化］" + r.path + (r.info_path ? "（信息文件: " + r.info_path + "）" : "");
         }
       } else {
         if (s.stopped) break; // 停止导致的错误不计入失败
@@ -778,6 +962,20 @@ async function runDownloadLoop() {
   }
 }
 
+/** 刷新：保留当前输入（保存目录等设置不变），重置下载状态后重新扫盘，可再次依次下载。 */
+async function onRefresh() {
+  stopStatusPolling();
+  hideAuthBanner();
+  dlSession = null;
+  scanResult = null;
+  $("#scan-list").innerHTML = "";
+  $("#scan-summary").textContent = "已刷新，正在重新扫盘…";
+  $("#fetch-btn").disabled = true;
+  setDownloadButtons("idle");
+  refreshManifestInfo();
+  await onScan();
+}
+
 async function onStopFetch() {
   if (!dlSession || dlSession.stopped) return;
   dlSession.stopped = true;
@@ -817,14 +1015,34 @@ $("#split-url-btn").addEventListener("click", splitUrlRows);
 $("#search-all-btn").addEventListener("click", onSearchAll);
 $("#save-manifest-btn").addEventListener("click", saveManifest);
 $("#scan-btn").addEventListener("click", onScan);
+$("#refresh-btn").addEventListener("click", onRefresh);
 $("#fetch-btn").addEventListener("click", onFetch);
+$("#browser-select").value = browserChoice;
+$("#browser-select").addEventListener("change", () => {
+  browserChoice = $("#browser-select").value;
+  saveBrowserChoice();
+});
 $("#stop-btn").addEventListener("click", onStopFetch);
 $("#resume-btn").addEventListener("click", onResumeFetch);
 $("#open-dir-btn").addEventListener("click", onOpenDir);
 $("#auth-done-btn").addEventListener("click", hideAuthBanner);
+$("#auth-reload-btn").addEventListener("click", onAuthReload);
 $("#auth-skip-btn").addEventListener("click", onSkipCurrent);
+$("#export-list-btn").addEventListener("click", onExportList);
+$("#import-btn").addEventListener("click", onImportList);
+$("#undone-btn").addEventListener("click", onGenUndone);
+$("#save-list-btn").addEventListener("click", onSaveList);
+$("#import-path").addEventListener("keydown", (e) => {
+  if (e.key === "Enter") onImportList();
+});
 
-renderStrategyList();
+// 设置变更自动保存（防抖），下次打开网站自动恢复
+for (const id of SETTINGS_INPUT_IDS) {
+  document.getElementById(id).addEventListener("input", scheduleSettingsSave);
+}
+$("#gen-info").addEventListener("change", scheduleSettingsSave);
+
+loadSettings();
 
 // 初始行的删除按钮
 document.querySelectorAll("#url-rows .row-remove").forEach((btn) => {

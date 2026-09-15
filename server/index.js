@@ -83,36 +83,41 @@ function volumeLabelOf(key) {
 
 const PYTHON_CANDIDATES = ["python3", "python"];
 
-function findPython() {
+/** 探测一个 Python：能否导入 paper_dl，以及是否装有 playwright（浏览器自动化依赖）。 */
+function probePython(cmd) {
   return new Promise((resolve) => {
-    let i = 0;
-    const tryNext = () => {
-      if (i >= PYTHON_CANDIDATES.length) return resolve(null);
-      const cmd = PYTHON_CANDIDATES[i++];
-      execFile(cmd, ["-c", "import paper_dl.webcli"], { cwd: ROOT }, (err) => {
-        if (err) tryNext();
-        else resolve(cmd);
+    execFile(cmd, ["-c", "import paper_dl.webcli"], { cwd: ROOT }, (err) => {
+      if (err) return resolve(null);
+      execFile(cmd, ["-c", "import playwright"], { cwd: ROOT }, (err2) => {
+        resolve({ cmd, playwright: !err2 });
       });
-    };
-    tryNext();
+    });
   });
+}
+
+async function findPython() {
+  // 浏览器自动化是唯一的下载方式：多个 Python 都可用时，
+  // 优先选择装有 playwright 的那个，避免下载第一步就失败
+  const found = [];
+  for (const cmd of PYTHON_CANDIDATES) {
+    const probe = await probePython(cmd);
+    if (probe) found.push(probe);
+  }
+  const withPlaywright = found.find((p) => p.playwright);
+  return (withPlaywright || found[0] || {}).cmd || null;
 }
 
 let pythonCmd = null;
 
 /** 调用 python -m paper_dl.webcli <args>，返回解析后的 JSON。 */
-/** 当前正在执行的下载任务（供停止功能终止进程并清理半成品文件）。 */
-let activeFetch = null; // {child, pdfPath, txtPath}
-
-function runWebCli(args, timeoutMs = 180000, track = null) {
+function runWebCli(args, timeoutMs = 180000) {
   return new Promise((resolve, reject) => {
     if (!pythonCmd) return reject(new Error("Python 环境不可用"));
-    const child = execFile(
+    execFile(
       pythonCmd,
       ["-m", "paper_dl.webcli", ...args],
       { cwd: ROOT, timeout: timeoutMs, maxBuffer: 16 * 1024 * 1024 },
       (err, stdout, stderr) => {
-        if (activeFetch && activeFetch.child === child) activeFetch = null;
         const line = (stdout || "").trim().split("\n").pop() || "";
         let data = null;
         try {
@@ -121,33 +126,11 @@ function runWebCli(args, timeoutMs = 180000, track = null) {
           // 保留 null，走下方错误分支
         }
         if (data) return resolve(data);
-        const detail = err ? (err.killed ? "下载已停止或子进程超时" : err.message) : "";
+        const detail = err ? (err.killed ? "子进程超时" : err.message) : "";
         reject(new Error(`webcli 调用失败: ${detail} ${stderr || ""}`.trim()));
       }
     );
-    if (track) {
-      activeFetch = { child, pdfPath: track.pdfPath, txtPath: track.txtPath };
-    }
   });
-}
-
-/** 停止当前下载：杀掉下载子进程，并删除停止前产生的半成品 PDF / 信息文件。 */
-function stopActiveFetch() {
-  if (!activeFetch) return false;
-  activeFetch.stopped = true;
-  try {
-    activeFetch.child.kill("SIGKILL");
-  } catch {
-    /* 进程可能已退出 */
-  }
-  for (const p of [activeFetch.pdfPath, activeFetch.txtPath]) {
-    try {
-      if (p) fs.rmSync(p, { force: true });
-    } catch {
-      /* 忽略清理失败 */
-    }
-  }
-  return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -263,22 +246,30 @@ function bwRequest(payload) {
       new Promise((resolve, reject) => {
         const id = w.nextId++;
         w.pending.set(id, { resolve, reject });
+        let onId = null;
+        if (payload && typeof payload.onId === "function") {
+          onId = payload.onId;
+          delete payload.onId; // 不随协议下发
+        }
         try {
           w.child.stdin.write(JSON.stringify({ id, ...payload }) + "\n");
         } catch (err) {
           w.pending.delete(id);
           reject(new Error("浏览器自动化进程不可用: " + err.message));
         }
+        if (onId) onId(id); // 让调用方拿到自己的请求 id，用于精确中止
       })
   );
 }
 
-/** 向浏览器 worker 发送控制指令（stop/skip），失败不抛错。 */
-function bwControl(op) {
+/** 向浏览器 worker 发送控制指令。target 指明只中止对应的 fetch 请求；为空则全局生效。 */
+function bwControl(op, target = null) {
   if (!bw || bw.exited || !bw.ready) return false;
   const id = bw.nextId++;
+  const msg = { id, op };
+  if (target !== null && target !== undefined) msg.target = target;
   try {
-    bw.child.stdin.write(JSON.stringify({ id, op }) + "\n");
+    bw.child.stdin.write(JSON.stringify(msg) + "\n");
     return true;
   } catch {
     return false;
@@ -429,12 +420,40 @@ function serveStatic(req, res, pathname) {
 }
 
 // ---------------------------------------------------------------------------
-// 清单读写
+// 清单读写（支持“当前任务清单”切换：上次所用清单 / 生成的未下载清单 / 导入的清单）
 // ---------------------------------------------------------------------------
+
+const STATE_PATH = path.join(__dirname, "state.json");
+
+function readState() {
+  try {
+    return JSON.parse(fs.readFileSync(STATE_PATH, "utf8"));
+  } catch {
+    return {};
+  }
+}
+
+function writeState(st) {
+  fs.writeFileSync(STATE_PATH, JSON.stringify(st, null, 2), "utf8");
+}
+
+/** 当前活动任务清单：默认 download-manifest.json；网站打开时自动沿用上次所用清单。
+ *  上次所用清单文件可能已被删除/移动，此时回退到默认清单。 */
+let activeListPath = readState().activeList || MANIFEST_PATH;
+if (activeListPath !== MANIFEST_PATH && !fs.existsSync(activeListPath)) {
+  activeListPath = MANIFEST_PATH;
+}
+
+function setActiveList(p) {
+  activeListPath = p;
+  const st = readState();
+  st.activeList = p;
+  writeState(st);
+}
 
 function readManifest() {
   try {
-    return JSON.parse(fs.readFileSync(MANIFEST_PATH, "utf8"));
+    return JSON.parse(fs.readFileSync(activeListPath, "utf8"));
   } catch {
     return { journals: [], items: [], updatedAt: null };
   }
@@ -442,6 +461,57 @@ function readManifest() {
 
 function writeManifest(manifest) {
   fs.writeFileSync(MANIFEST_PATH, JSON.stringify(manifest, null, 2), "utf8");
+}
+
+/** 生成不重复的清单文件路径：任务清单-<名称>.json，重名自动加 -1/-2 序号 */
+function nextListPath(name) {
+  const base = sanitizeComponent(name, 60);
+  let p = path.join(ROOT, base + ".json");
+  let n = 1;
+  while (fs.existsSync(p)) {
+    p = path.join(ROOT, `${base}-${n}.json`);
+    n += 1;
+  }
+  return p;
+}
+
+/** 从清单推断展示用名称（期刊名） */
+function listName(manifest, fallback) {
+  const journals = (manifest.journals || []).filter(Boolean);
+  if (journals.length) return journals.join("、");
+  const j = (manifest.items || []).find((it) => it.journal);
+  return (j && j.journal) || fallback || "任务";
+}
+
+// ---------------------------------------------------------------------------
+// 下载设置持久化（state.json：下次打开网站自动恢复上次执行任务时的设置）
+// ---------------------------------------------------------------------------
+
+const KNOWN_BROWSERS = ["auto", "chrome", "edge", "firefox", "safari"];
+
+const clampRange = (v, min, max) => {
+  const n = Number(v);
+  return Number.isFinite(n) ? Math.min(max, Math.max(min, Math.round(n))) : undefined;
+};
+
+/** 只保留已知设置项并做类型/范围收敛，防止脏数据写进 state.json */
+function sanitizeSettings(s) {
+  const out = {};
+  out.root = String(s.root || "").trim().slice(0, 500);
+  const nums = {
+    waitMinutes: [1, 120],
+    maxRefresh: [0, 20],
+    verifyInterval: [1, 120],
+    verifyMaxFails: [1, 50],
+    intervalSec: [0, 300],
+  };
+  for (const [k, [min, max]] of Object.entries(nums)) {
+    const v = clampRange(s[k], min, max);
+    if (v !== undefined) out[k] = v;
+  }
+  if (typeof s.genInfo === "boolean") out.genInfo = s.genInfo;
+  if (KNOWN_BROWSERS.includes(s.browser)) out.browser = s.browser;
+  return out;
 }
 
 // ---------------------------------------------------------------------------
@@ -492,7 +562,24 @@ async function handleApi(req, res, pathname, body) {
   }
 
   if (pathname === "/api/manifest") {
-    return sendJson(res, 200, { ok: true, manifest: readManifest() });
+    return sendJson(res, 200, {
+      ok: true,
+      manifest: readManifest(),
+      path: activeListPath,
+    });
+  }
+
+  // 下载设置持久化：GET 读取上次执行任务时的设置；POST 保存当前设置（下次打开自动恢复）
+  if (pathname === "/api/settings") {
+    if (req.method === "GET") {
+      return sendJson(res, 200, { ok: true, settings: readState().settings || null });
+    }
+    const s = body.settings && typeof body.settings === "object" ? body.settings : null;
+    if (!s) return sendJson(res, 400, { error: "缺少设置内容" });
+    const st = readState();
+    st.settings = sanitizeSettings(s);
+    writeState(st);
+    return sendJson(res, 200, { ok: true, settings: st.settings });
   }
 
   // 生成下载清单：按选择集（整卷 / 单篇）从缓存展开为完整文献信息，
@@ -534,7 +621,68 @@ async function handleApi(req, res, pathname, body) {
       updatedAt: new Date().toISOString(),
     };
     writeManifest(manifest);
+    setActiveList(MANIFEST_PATH); // 板块一生成的清单自动作为当前执行清单
     return sendJson(res, 200, { ok: true, count: items.length });
+  }
+
+  // 保存当前任务清单：任务清单-<期刊名>.json，重名自动加序号
+  if (pathname === "/api/list/save") {
+    const manifest = readManifest();
+    if (!manifest.items || !manifest.items.length) {
+      return sendJson(res, 400, { error: "当前没有任务清单可保存，请先生成或导入" });
+    }
+    const p = nextListPath("任务清单-" + listName(manifest));
+    fs.writeFileSync(p, JSON.stringify(manifest, null, 2), "utf8");
+    return sendJson(res, 200, { ok: true, path: p, count: manifest.items.length });
+  }
+
+  // 生成“未下载清单”：按本地目录扫描当前清单，缺失条目另存为新清单并设为当前执行清单
+  if (pathname === "/api/list/undone") {
+    const root = String(body.root || "").trim();
+    if (!root) return sendJson(res, 400, { error: "本地目录不能为空" });
+    const manifest = readManifest();
+    const items = manifest.items || [];
+    if (!items.length) return sendJson(res, 400, { error: "当前任务清单为空" });
+    const missingItems = [];
+    let exists = 0;
+    for (const item of items) {
+      const p = entryPaths(root, item);
+      if (fs.existsSync(p.pdf)) exists += 1;
+      else missingItems.push(item);
+    }
+    if (!missingItems.length) {
+      return sendJson(res, 200, { ok: true, count: 0, exists, message: "清单内文献均已下载，未下载清单为空" });
+    }
+    const undone = {
+      journals: manifest.journals || [],
+      items: missingItems,
+      updatedAt: new Date().toISOString(),
+      source: "undone",
+      root,
+    };
+    const p = nextListPath("任务清单-未下载-" + listName(manifest));
+    fs.writeFileSync(p, JSON.stringify(undone, null, 2), "utf8");
+    setActiveList(p);
+    return sendJson(res, 200, { ok: true, path: p, count: missingItems.length, exists });
+  }
+
+  // 导入任务清单：按路径载入并设为当前执行清单
+  if (pathname === "/api/list/import") {
+    let p = String(body.path || "").trim();
+    if (!p) return sendJson(res, 400, { error: "任务清单路径不能为空" });
+    if (!path.isAbsolute(p)) p = path.join(ROOT, p);
+    if (!fs.existsSync(p)) return sendJson(res, 400, { error: "文件不存在: " + p });
+    let data;
+    try {
+      data = JSON.parse(fs.readFileSync(p, "utf8"));
+    } catch (e) {
+      return sendJson(res, 400, { error: "读取任务清单失败: " + e.message });
+    }
+    if (!Array.isArray(data.items)) {
+      return sendJson(res, 400, { error: "文件不是有效的任务清单（缺少 items 数组）" });
+    }
+    setActiveList(p);
+    return sendJson(res, 200, { ok: true, path: p, count: data.items.length, journals: data.journals || [] });
   }
 
   if (pathname === "/api/scan") {
@@ -567,13 +715,7 @@ async function handleApi(req, res, pathname, body) {
     });
   }
 
-  const DEFAULT_STRATEGIES = ["browser", "unpaywall", "openalex", "publisher"];
-  const STRATEGY_NAMES = {
-    browser: "浏览器自动化",
-    unpaywall: "Unpaywall",
-    openalex: "OpenAlex",
-    publisher: "出版商直链",
-  };
+  const BROWSER_CHOICES = ["auto", "chrome", "edge", "firefox", "safari"];
   const clampNum = (v, min, max, def) => {
     const n = Number(v);
     return Number.isFinite(n) ? Math.min(max, Math.max(min, Math.round(n))) : def;
@@ -584,103 +726,70 @@ async function handleApi(req, res, pathname, body) {
     const item = body.item || {};
     if (!root || !item.doi) return sendJson(res, 400, { error: "缺少 root 或 doi" });
     const p = entryPaths(root, item);
-    const meta = JSON.stringify({
-      journal: item.journal || "",
-      volume: item.volume || "",
-      issue: item.issue || "",
-      date: item.date || "",
-      authors: item.authors || [],
-    });
-    const email = String(body.email || "paper-dl@localhost");
-    const strategies =
-      Array.isArray(body.strategies) && body.strategies.length
-        ? body.strategies.map(String).filter((s) => DEFAULT_STRATEGIES.includes(s))
-        : DEFAULT_STRATEGIES;
-    if (!strategies.length) return sendJson(res, 400, { error: "下载策略列表为空" });
-    const waitMinutes = clampNum(body.waitMinutes, 1, 120, 5);
-    const maxRefresh = clampNum(body.maxRefresh, 0, 20, 3);
+    const waitMinutes = clampNum(body.waitMinutes, 1, 120, 2);
+    const maxRefresh = clampNum(body.maxRefresh, 0, 20, 2);
     const genInfo = body.genInfo !== false;
+    // 人机验证的模拟点击节奏：每 verifyInterval 秒点击一次，连续 verifyMaxFails 次未通过刷新页面
+    const verifyInterval = clampNum(body.verifyInterval, 1, 120, 5);
+    const verifyMaxFails = clampNum(body.verifyMaxFails, 1, 50, 5);
+    const rawBrowser = String(body.browser || "auto").trim().toLowerCase();
+    const browser = BROWSER_CHOICES.includes(rawBrowser) ? rawBrowser : "auto";
 
-    // 按用户排序的策略依次尝试：browser 走浏览器自动化 worker，其余走 webcli 子进程
-    const attempts = [];
+    // 下载只走浏览器自动化：打开出版商页面，自动通过人机验证并触发 PDF 下载
+    // 前端中断（停止下载 / 页面刷新 / 连接断开）时，只中止“本请求自己”的浏览器任务：
+    // 否则会误杀其他并发请求正在执行的任务（全局停止走 /api/fetch-stop）
+    let finished = false;
+    let myFetchId = null; // 本请求的浏览器任务 id
+    res.on("close", () => {
+      if (finished) return;
+      finished = true;
+      bwControl("stop", myFetchId);
+    });
     let result = null;
-    let paper = null;
-    for (const st of strategies) {
-      if (st === "browser") {
-        try {
-          const r = await bwRequest({
-            op: "fetch",
-            doi: String(item.doi),
-            root,
-            rel: p.rel,
-            stem: p.stem,
-            meta: {
-              journal: item.journal || "",
-              volume: item.volume || "",
-              issue: item.issue || "",
-              date: item.date || "",
-              authors: item.authors || [],
-            },
-            email,
-            wait_minutes: waitMinutes,
-            max_refresh: maxRefresh,
-            human_wait_min: 0,
-            generate_info: genInfo,
-            overwrite: false,
-          });
-          paper = r.paper || paper;
-          if (r.ok) {
-            result = { ...r, strategy: "browser" };
-            break;
-          }
-          attempts.push({ strategy: "browser", error: friendlyBrowserError(r.error) });
-          if (r.skipped) break; // 人工跳过：该篇不再尝试其他策略
-        } catch (err) {
-          attempts.push({ strategy: "browser", error: friendlyBrowserError(err.message) });
-        }
+    let error = null;
+    try {
+      const r = await bwRequest({
+        op: "fetch",
+        onId: (id) => { myFetchId = id; },
+        doi: String(item.doi),
+        root,
+        rel: p.rel,
+        stem: p.stem,
+        meta: {
+          journal: item.journal || "",
+          volume: item.volume || "",
+          issue: item.issue || "",
+          date: item.date || "",
+          authors: item.authors || [],
+        },
+        wait_minutes: waitMinutes,
+        max_refresh: maxRefresh,
+        verify_interval_s: verifyInterval,
+        verify_max_fails: verifyMaxFails,
+        human_wait_min: 0,
+        browser,
+        generate_info: genInfo,
+        overwrite: false,
+      });
+      if (r.ok) {
+        result = r;
       } else {
-        const args = [
-          "fetch",
-          "--doi", String(item.doi),
-          "--root", root,
-          "--rel", p.rel,
-          "--meta", meta,
-          "--email", email,
-          "--strategies", st,
-        ];
-        if (!genInfo) args.push("--no-info");
-        try {
-          // 登记为活动下载任务，支持“停止”操作
-          const r = await runWebCli(args, 180000, { pdfPath: p.pdf, txtPath: p.txt });
-          paper = r.paper || paper;
-          if (r.ok) {
-            result = { ...r, strategy: st };
-            break;
-          }
-          attempts.push({ strategy: st, error: r.error || "下载失败" });
-        } catch (err) {
-          attempts.push({ strategy: st, error: err.message });
-        }
+        error = friendlyBrowserError(r.error || "下载失败");
       }
+    } catch (err) {
+      error = friendlyBrowserError(err.message);
     }
+    // 标记请求已结束：之后的连接关闭属于正常结束，不再触发中止
+    finished = true;
     if (result) {
       return sendJson(res, 200, {
         ok: true,
         path: result.path,
         info_path: result.info_path,
-        strategy: result.strategy,
-        paper: result.paper || paper,
-        attempts,
+        paper: result.paper || null,
       });
     }
-    return sendJson(res, 502, {
-      ok: false,
-      error:
-        attempts.map((a) => `[${STRATEGY_NAMES[a.strategy] || a.strategy}] ${a.error}`).join("；") ||
-        "所有下载策略均失败",
-      attempts,
-      paper,
-    });
+    return sendJson(res, 502, { ok: false, error: error || "浏览器自动化下载失败" });
   }
 
   // 浏览器自动化实时状态（供前端轮询展示等待/刷新/人工干预进度）
@@ -694,11 +803,16 @@ async function handleApi(req, res, pathname, body) {
     return sendJson(res, 200, { ok: sent, skipped: sent, error: sent ? undefined : "当前没有浏览器自动化任务" });
   }
 
-  // 停止当前下载：终止下载进程（浏览器任务则发送中止指令）并删除半成品文件
+  // 人工干预：刷新当前验证页面（Cloudflare 等验证页卡死/循环时人工触发重试）
+  if (pathname === "/api/fetch-reload") {
+    const sent = bwControl("reload");
+    return sendJson(res, 200, { ok: sent, reloaded: sent, error: sent ? undefined : "当前没有浏览器自动化任务" });
+  }
+
+  // 停止当前下载：向浏览器 worker 发送中止指令（半成品文件由前端“继续下载”重新拉取）
   if (pathname === "/api/fetch-stop") {
-    const stopped = stopActiveFetch();
     const stoppedBrowser = bwControl("stop");
-    return sendJson(res, 200, { ok: true, stopped: stopped || stoppedBrowser });
+    return sendJson(res, 200, { ok: true, stopped: stoppedBrowser });
   }
 
   if (pathname === "/api/open-dir") {
@@ -749,6 +863,9 @@ async function main() {
     const url = new URL(req.url, `http://localhost:${PORT}`);
     try {
       if (url.pathname === "/api/manifest" && req.method === "GET") {
+        return await handleApi(req, res, url.pathname, {});
+      }
+      if (url.pathname === "/api/settings" && req.method === "GET") {
         return await handleApi(req, res, url.pathname, {});
       }
       if (url.pathname === "/api/fetch-status" && req.method === "GET") {

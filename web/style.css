@@ -306,7 +306,30 @@ body {
   font-size: 14px;
 }
 
-/* 下载方式排序 */
+.manifest-info .list-path {
+  color: var(--muted);
+  word-break: break-all;
+}
+
+/* 任务清单操作栏（导入 / 生成未下载清单 / 保存） */
+.list-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-top: 10px;
+}
+
+.list-bar .import-path {
+  flex: 1;
+  min-width: 280px;
+}
+
+.list-bar .hint {
+  flex-basis: 100%;
+}
+
+/* 设置分组（浏览器选择等） */
 .strategy-setting {
   margin-top: 12px;
   display: flex;
@@ -319,51 +342,21 @@ body {
   font-size: 13px;
 }
 
-.strategy-list {
-  list-style: none;
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-
-.strategy-list li {
-  display: flex;
-  align-items: center;
-  gap: 10px;
+/* 浏览器选择 */
+.browser-select {
+  max-width: 360px;
   border: 1px solid var(--border);
   border-radius: 8px;
-  padding: 6px 10px;
-  font-size: 13px;
+  padding: 8px 12px;
+  font-size: 14px;
+  background: #fff;
+  color: var(--text);
+  cursor: pointer;
 }
 
-.strategy-order {
-  width: 22px;
-  height: 22px;
-  border-radius: 50%;
-  background: var(--primary);
-  color: #fff;
-  font-size: 12px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  flex-shrink: 0;
-}
-
-.strategy-name {
-  font-weight: 600;
-  flex-shrink: 0;
-}
-
-.strategy-desc {
-  color: var(--muted);
-  flex: 1;
-  min-width: 0;
-}
-
-.strategy-list button {
-  padding: 2px 10px;
-  font-size: 13px;
-  line-height: 1.4;
+.browser-select:focus {
+  outline: 2px solid rgba(37, 99, 235, 0.25);
+  border-color: var(--primary);
 }
 
 .checkbox-field input[type="checkbox"] {
