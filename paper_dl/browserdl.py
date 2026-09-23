@@ -19,21 +19,42 @@
     {"type": "ready"}                       # worker 就绪（playwright 可用）
     {"type": "fatal", "error": "..."}       # 无法启动（如未安装 playwright）
     {"type": "status", "state": "...", "message": "...", "doi": "..."}
-    {"id": 2, "ok": true, "path": "...", "info_path": "...", ...}
-    {"id": 2, "ok": false, "error": "...", "skipped": true}
+    {"id": 2, "ok": true, "path": "...", "info_path": "...", "access_path": "...", ...}
+    {"id": 2, "ok": false, "error": "...", "skipped": true, "no_access": true,
+     "access_path": "..."}                  # access_path：已写入的无权限记录文件
 
 单个任务的流程：
-打开落地页 -> 寻找并点击 PDF 下载入口（失败则尝试出版商直链）
+默认先用 Sci-Hub 镜像按 DOI 检索下载（不在界面显示，见 scihub 模块）；失败后转
+出版商官方页面：打开落地页 -> 寻找并点击 PDF 下载入口（失败则尝试出版商直链）
 -> 每轮等待 wait_minutes 分钟：期间监测下载队列 / 登录与验证页 / 跳过与停止指令
 -> 无响应则刷新页面，最多 max_refresh 次，仍无响应则报错交给下一个任务
+（Sci-Hub 阶段同样遵循这两项设置）
 -> 检测到浏览器开始下载 PDF 后等待完成 -> 按命名规则移动/重命名到目标目录
--> 按设置生成信息文件 -> 关闭标签页，等待下一个任务。
+-> 生成信息文件（始终） -> 写入权限记录文件 -> 关闭标签页，等待下一个任务。
 
-验证处理分两类：
+无访问权限（付费墙）处理：出版商对无权下载的 PDF 请求通常返回购买/机构登录面板
+（Wiley 系返回 "Get access to the full version of this article… Purchase Instant Access"，
+或 302 重定向到 /doi/abs/ 摘要页）——检测到即立即跳过该篇（返回 no_access 标记），
+不做等待/刷新重试。
+
+权限记录文件（双路径权限）：权限确认后在该文献的保存目录写入 <DOI尾缀>.access.json，
+包含两个权限：官方网页权限 official（"granted" 有权限 / "denied" 无权限）与
+Sci-Hub 是否收录 scihub（"available" / "unavailable"；unavailable 仅在检索结果
+页成功打开并明确报告未收录时标记——镜像打不开 / HTTP 错误 / 网络波动一律按
+下载失败处理，不标记）。各路径只更新自己、保留另一路径的已知状态。Node 服务
+下载前始终扫描该记录：仅当两条路径都标记为“无”（official=denied 且
+scihub=unavailable）时该文献才直接跳过。
+
+验证处理分三类：
 - 人机验证 / 反爬拦截（Cloudflare Turnstile、“确认您是真人”等）：走自动验证循环——
-  每 verify_interval_s 秒对验证控件模拟点击一次，连续 verify_max_fails 次未通过则
-  刷新页面等待重新验证；这些时间都计入当前轮的等待窗口（即“每页等待时间”内），
-  窗口耗尽按“无响应”处理（消耗一次刷新次数）。验证通过（连续两次干净检测）不消耗刷新次数。
+  存在可点击的验证控件（复选框/验证按钮）时每 verify_interval_s 秒模拟点击一次，
+  连续 verify_max_fails 次未通过则刷新页面等待重新验证；这些时间都计入当前轮的等待
+  窗口（即“每页等待时间”内），窗口耗尽按“无响应”处理（消耗一次刷新次数）。
+  验证通过（连续两次干净检测）不消耗刷新次数。
+  Cloudflare 托管型验证页没有可点击控件（会自动完成）：此时被动等待，不点击、
+  不刷新——盲目点击/刷新反而会重启验证流程，导致验证永远无法完成。
+- 无访问权限（付费墙）：出版商返回购买/机构登录面板（或 302 到摘要页）时立即跳过该篇
+  （返回 no_access 标记），不做等待/刷新重试。
 - 登录页等身份验证：页面保持打开等待人工处理（human_wait_min=0 表示无限等待），
   可通过 skip/stop/reload 指令跳过、停止或刷新页面重试。
 页面正在跳转导致无法判定验证状态时一律视为“仍在验证”，避免在验证完成前导航离开。
@@ -47,12 +68,15 @@ import os
 import re
 import shutil
 import sys
+import tempfile
 import threading
 import time
 import traceback
 from pathlib import Path
+from urllib.parse import urlparse
 
-from .downloader import write_info_file
+from .downloader import is_pdf_file_ok, write_access_marker, write_info_file
+from . import scihub
 from .resolvers import Paper, ResolveError, resolve_doi
 
 # 触发下载时优先点击的页面元素（出版商通用的 PDF 链接形态）
@@ -61,8 +85,14 @@ CLICK_SELECTORS = [
     "a[href*='/doi/pdfdirect/']",
     "a[href*='/doi/epdf/']",
     "a[href$='.pdf']",
+    # 带查询参数的 PDF 链接（如 eLife /download/.../xxx.pdf?_hash=...，
+    # href 不以 .pdf 结尾，a[href$='.pdf'] 匹配不到）
+    "a[href*='.pdf?']",
     "a[download]",
 ]
+
+#: 命中下载入口但实际是插图/附图的链接特征：跳过，继续找真正的文章 PDF
+_FIGURE_LINK_RE = re.compile(r"/figs?/|[-_/]fig\d+|fig\d+[-_.]|_fig\d+", re.IGNORECASE)
 
 #: 界面可选的浏览器（auto = 依次尝试本机 Chrome / Edge / 内置 Chromium）
 BROWSER_CHOICES = ("auto", "chrome", "edge", "firefox", "safari")
@@ -78,6 +108,9 @@ BROWSER_LABELS = {
 
 MIN_WINDOW_SECONDS = 60
 DOWNLOAD_COMPLETE_TIMEOUT = 900  # 单个文件下载完成的兜底等待（15 分钟）
+# Cloudflare 托管型验证的被动等待时长：期间不点击、不刷新——验证无需点击、
+# 实测约 5-20s 自动完成；过早模拟点击反而会打断/升级验证，使其永远无法通过
+CF_PASSIVE_GRACE_SECONDS = 30
 
 PLAYWRIGHT_INSTALL_HINT = (
     "浏览器自动化需要先安装 Playwright 并准备浏览器："
@@ -94,34 +127,66 @@ class StopRequested(RuntimeError):
     """下载被用户停止。"""
 
 
+class NoAccessError(RuntimeError):
+    """当前浏览器会话对该文献没有访问权限（付费墙），立即跳过该篇。"""
+
+
+class _DirectPdfDownload:
+    """inline PDF 浏览页直接取回的“伪 Download”：对齐 Playwright Download 的
+    path()/failure()/suggested_filename 接口，后续保存流程与真实下载完全一致。"""
+
+    def __init__(self, path: Path, filename: str):
+        self._path = path
+        self.suggested_filename = filename
+
+    async def path(self) -> str:
+        return str(self._path)
+
+    async def failure(self) -> None:
+        return None
+
+
 def _emit(payload: dict) -> None:
     """输出一行 JSON 并立即刷新（stdout 是与 Node 通信的唯一通道）。"""
     sys.stdout.write(json.dumps(payload, ensure_ascii=False) + "\n")
     sys.stdout.flush()
 
-
-# 页面上检测登录 / 人机验证 / 反爬拦截的信号（在浏览器内执行）
+# 页面上检测登录 / 人机验证 / 反爬拦截 / 无访问权限的信号（在浏览器内执行）
 _AUTH_SNIFF_JS = """() => {
   const visible = (el) => !!(el && (el.offsetWidth || el.offsetHeight || el.getClientRects().length));
   const pwd = [...document.querySelectorAll('input[type=password]')].some(visible);
   const title = document.title || '';
-  const body = ((document.body && document.body.innerText) || '').slice(0, 4000);
+  const body = ((document.body && document.body.innerText) || '').slice(0, 8000);
+  const text = title + ' ' + body;
   // 关键：Turnstile/reCAPTCHA 验证成功后，其 iframe 仍会留在页面上显示“成功”，
   // 不能凭 iframe 存在判定“仍在验证”；验证通过后隐藏 token 输入框会被填值，
   // 以此判定验证已成功（verified=true 时直接视为页面干净，避免误刷新清掉已通过的验证）
   const verified = [...document.querySelectorAll(
     'input[name="cf-turnstile-response"], input[name="g-recaptcha-response"], input[name="h-captcha-response"]'
   )].some((i) => (i.value || '').length > 10);
-  const cf = /just a moment|attention required|verify you are human|checking your browser|performing security verification/i.test(title)
+  // Cloudflare 验证页的标题/正文按浏览器语言本地化（如中文“请稍候…/正在进行安全验证”），
+  // 只匹配英文会漏检，导致把验证页当普通页面干等整轮后按“无响应”刷新
+  const cf = /just a moment|attention required|verify you are human|checking your browser|performing security verification|请稍候|正在进行安全验证|正在进行安全检查|确认您不是自动程序|请证明您不是机器人/i.test(text)
     || !!document.querySelector('#cf-challenge-running, .cf-browser-verification, #challenge-form, iframe[src*="challenges.cloudflare.com"]');
-  const denied = /access denied|request blocked|403 forbidden|are you a robot|unusual traffic/i.test(title + ' ' + body);
-  return { pwd, cf, denied, verified, title: title.slice(0, 200) };
+  const denied = /access denied|request blocked|403 forbidden|are you a robot|unusual traffic/i.test(text);
+  // 无访问权限（付费墙）：出版商明确返回购买/租用/机构登录选项——
+  // Wiley 系无权下载时 PDF 入口会返回 "Get access to the full version of this article /
+  // Purchase Instant Access / $xx" 面板（或直接 302 到 /doi/abs/ 摘要页，见下方 URL 判定），
+  // 这类状态刷新/重试无解，必须立即跳过而不是按“无响应”空等
+  const paywall = /get access to the full version|purchase instant access|buy article|rent this article|rent article|purchase this article|purchase access|get access to this (article|content)|you (do not|don't) have (access|permission) to (this|the) (article|content|resource)|you do not have full access|access to (this|the) (article|content|resource) (has been|is) denied|not entitled to access/i.test(text);
+  return { pwd, cf, denied, paywall, verified, title: title.slice(0, 200), url: location.href };
 }"""
 
 _AUTH_URL_RE = re.compile(
     r"(?:^|[./@-])(?:login|signin|log-in|logon|sso|athens|shibboleth|idp|authenticate)(?:[./?#]|$)",
     re.IGNORECASE,
 )
+
+#: Wiley 系（Wiley / AGU 等）对无权下载的 PDF 请求 302 重定向到 /doi/abs/ 摘要页
+_ABS_REDIRECT_RE = re.compile(r"/doi/abs/", re.IGNORECASE)
+
+#: 无访问权限（付费墙）：检测到立即跳过该篇，不等待、不刷新重试
+NO_ACCESS_REASON = "无访问权限"
 
 #: 这些验证原因属于“人机验证/拦截”类：走自动点击 + 有限次数刷新的验证循环
 #: （受每轮等待窗口约束）；其余（登录页等）保持等待人工处理。
@@ -175,6 +240,7 @@ class BrowserWorker:
         self._browser_redirect: str | None = None  # firefox→edge 等自动改道提示
         self._downloads: asyncio.Queue = asyncio.Queue()
         self._stray_pages: set = set()
+        self._pdf_grab_tried: set[str] = set()  # inline PDF 浏览页已尝试直接取回的 URL
 
     # ------------------------------------------------------------------
     # 浏览器生命周期
@@ -198,6 +264,36 @@ class BrowserWorker:
             "safari": "browser-profile-webkit",
         }.get(browser, "browser-profile")
         return base / "journal-paper-downloader" / suffix
+
+
+    @staticmethod
+    def _clean_profile_download_history(profile: Path) -> None:
+        """启动浏览器前清理 profile 中的下载历史（downloads / downloads_url_chains）。
+
+        实测：Chrome（153，WSL/WSLg 环境）在 profile 残留上一会话的下载记录
+        （History 库 downloads 表）时，下次启动后浏览器进程会在下载/退出时崩溃
+        （SIGSEGV/SIGTRAP），Playwright 侧表现为 “Target page, context or
+        browser has been closed”，下载必然失败。每次启动前清空这两张表即可规避；
+        自动化 profile 本身无需保留下载历史。清理失败不阻塞启动。
+        """
+        hist = profile / "Default" / "History"
+        if not hist.exists():
+            return
+        try:
+            import sqlite3
+
+            db = sqlite3.connect(str(hist), timeout=5)
+            try:
+                for table in ("downloads", "downloads_url_chains"):
+                    try:
+                        db.execute(f"DELETE FROM {table}")
+                    except sqlite3.OperationalError:
+                        pass  # 表不存在（不同版本 schema 差异）
+                db.commit()
+            finally:
+                db.close()
+        except Exception:
+            pass  # 数据库被占用/损坏等情况不阻塞浏览器启动
 
     async def _ensure_browser(self, browser: str = "auto") -> None:
         """确保浏览器实例就绪；浏览器选择变化时先关闭旧实例再按新选择启动。"""
@@ -224,6 +320,8 @@ class BrowserWorker:
             self._pw = await async_playwright().start()
         profile = self._profile_dir(browser)
         profile.mkdir(parents=True, exist_ok=True)
+        # 启动前清理 profile 中的下载历史（见 _clean_profile_download_history 说明）
+        self._clean_profile_download_history(profile)
 
         # (playwright 引擎, channel)：chromium 族可用本机 Chrome / Edge / 内置 Chromium
         if browser == "chrome":
@@ -391,6 +489,8 @@ class BrowserWorker:
         self.skip_event.clear()
         self.reload_event.clear()
         self._drain_downloads()
+        # inline PDF 浏览页直接取回：每个 URL 只尝试一次，失败不反复请求
+        self._pdf_grab_tried: set[str] = set()
 
         wait_minutes = float(req.get("wait_minutes") or 2)
         window = max(MIN_WINDOW_SECONDS, int(wait_minutes * 60))
@@ -409,7 +509,9 @@ class BrowserWorker:
         rel_parts = [p for p in str(req.get("rel") or "").split("/") if p]
         target_dir = root.joinpath(*rel_parts) if rel_parts else root
         final_pdf = target_dir / f"{stem}.pdf"
-        if final_pdf.exists() and not req.get("overwrite"):
+        # 已存在且文件正常的 PDF 才跳过；异常文件（残缺/HTML 错误页）视为不存在，
+        # 允许重新下载（_finalize 落地前会先删除旧文件）
+        if final_pdf.exists() and is_pdf_file_ok(final_pdf) and not req.get("overwrite"):
             return {"ok": False, "error": f"文件已存在: {final_pdf}"}
 
         meta = req.get("meta") or {}
@@ -441,23 +543,70 @@ class BrowserWorker:
             pass
 
         try:
-            download = await self._run_task(page, paper, req, window, max_refresh)
+            # 默认下载策略（不在界面显示，默认优先）：先走 Sci-Hub 按 DOI 检索下载，
+            # 失败（镜像无法打开/未命中/PDF 直链失败）再转出版商官方页面。
+            # 权限记录按路径写入：Sci-Hub 命中记 scihub=available、全部镜像报告
+            # 未命中记 scihub=unavailable、出版商下载成功记 official=granted、
+            # 出版商确认无权限记 official=denied（见 _finalize / NoAccessError 处理）
+            download = None
+            source = "publisher"
+            if paper.doi and scihub.scihub_enabled():
+                outcome, download = await self._scihub_fetch(
+                    page, paper, req, window, max_refresh
+                )
+                if outcome == "download":
+                    source = "sci-hub"
+                elif outcome == "not_indexed":
+                    # 全部镜像明确报告未收录该 DOI：记 Sci-Hub 路径（保留官方
+                    # 路径的已知状态），随后仍回退官方页面尝试
+                    try:
+                        write_access_marker(
+                            paper, target_dir, stem,
+                            scihub="unavailable",
+                            reason_scihub="Sci-Hub 全部镜像报告未收录该 DOI",
+                        )
+                    except Exception:
+                        pass  # 记录写失败不影响下载流程
+            if download is None:
+                download = await self._run_task(page, paper, req, window, max_refresh)
             self._status(req, "saving", "下载完成，正在按命名规则保存文件…")
             tmp_path = await download.path()
             failure = await download.failure()
             if failure:
                 raise ResolveError(f"浏览器下载失败: {failure}")
-            saved, info_path = await asyncio.to_thread(
-                self._finalize, Path(tmp_path), target_dir, stem, paper, meta, generate_info
+            saved, info_path, access_path = await asyncio.to_thread(
+                self._finalize, Path(tmp_path), target_dir, stem, paper, meta,
+                generate_info, source,
             )
             self._status(req, "done", f"已保存: {saved.name}")
             return {
                 "ok": True,
                 "path": str(saved),
                 "info_path": str(info_path) if info_path else None,
+                "access_path": str(access_path),
                 "paper": paper.to_dict(),
                 "suggested": download.suggested_filename,
                 "channel": self._channel_used,
+                "source": source,
+            }
+        except NoAccessError as exc:
+            # 官方路径无权限已确认：写入 official=denied（合并语义保留 Sci-Hub
+            # 路径的已知状态）；若 Sci-Hub 路径也标记为无，下次扫盘将直接跳过
+            access_path = None
+            try:
+                access_path = write_access_marker(
+                    paper, target_dir, stem, official="denied", reason_official=str(exc)
+                )
+            except Exception:
+                pass  # 记录写失败不影响跳过流程
+            note = f"；已在保存目录写入无权限记录: {access_path}" if access_path else ""
+            self._status(req, "skipped", str(exc) + note)
+            return {
+                "ok": False,
+                "error": str(exc),
+                "no_access": True,
+                "skipped": True,
+                "access_path": str(access_path) if access_path else None,
             }
         except SkipRequested as exc:
             return {"ok": False, "error": str(exc), "skipped": True}
@@ -484,6 +633,237 @@ class BrowserWorker:
                 except Exception:
                     pass
             self._drain_downloads()
+
+    # ------------------------------------------------------------------
+    # Sci-Hub 默认下载策略（不在界面显示）：镜像按序尝试，失败转官方页面
+    # ------------------------------------------------------------------
+
+    async def _scihub_fetch(self, page, paper: Paper, req: dict, window: int, max_refresh: int):
+        """按镜像顺序尝试 Sci-Hub DOI 检索 + PDF 下载。
+
+        返回 (outcome, download) 二元组，由调用方转入出版商官方页面流程：
+          ("download", Download) —— 下载已完成；
+          ("not_indexed", None)  —— 至少一个镜像的 DOI 检索结果页成功打开并渲染，
+                                    且明确报告未收录该 DOI（确定性结论，调用方记
+                                    scihub=unavailable 权限；三个镜像为同一后端，
+                                    一个明确结论即足够）；
+          ("failed", None)       —— 其余失败（镜像无法打开/刷新后仍无响应/
+                                    PDF 直链失败），非确定性结论，调用方不标记
+                                    Sci-Hub 未收录。
+        判定原则：scihub 是否收录只以“成功打开的检索结果页”为准——HTTP 错误、
+        302 回首页、超时等“网页没打开”的情况一律按下载失败（failed）处理，
+        绝不据此判定未收录（避免网络波动误标 scihub=unavailable）。
+        镜像策略（见 scihub 模块）：默认第一个，无法打开 30s 后切换下一个。
+        延续“每页等待时间”（window）与“无响应最大刷新次数”（max_refresh）
+        的数值设置（不在界面单独显示）：单轮等待窗口内无响应（检索结果未
+        渲染 / PDF 直链无响应）则刷新页面重试，最多 max_refresh 次，仍无
+        响应才切换下一镜像。
+        注意：本阶段不写 official 权限——官方网页权限只以出版商官方页面为准。
+        """
+        doi = str(paper.doi or "").strip()
+        if not doi:
+            return "failed", None
+        mirrors = scihub.SCIHUB_MIRRORS
+        for idx, mirror in enumerate(mirrors):
+            got = self._pop_download()  # 上一镜像遗留的下载直接取用
+            if got is not None:
+                return "download", got
+            self._status(
+                req, "scihub",
+                f"正在通过 Sci-Hub 检索 DOI（镜像 {idx + 1}/{len(mirrors)}: {mirror}）…",
+            )
+            try:
+                resp = await asyncio.wait_for(
+                    page.goto(
+                        scihub.scihub_page_url(mirror, doi),
+                        wait_until="commit",
+                        timeout=scihub.MIRROR_OPEN_BUDGET * 1000,
+                    ),
+                    timeout=scihub.MIRROR_OPEN_BUDGET + 5,
+                )
+                # 镜像未收录时通常返回 403 并 302 回首页（实测行为），但网络
+                # 波动/限流同样会触发该表现——无法区分，故一律按“网页没打开的
+                # 下载失败”处理：切换下一镜像，绝不据此判定“未收录”
+                final_url = page.url or ""
+                try:
+                    status = resp.status if resp is not None else 0
+                except Exception:
+                    status = 0
+                if status >= 400 or (
+                    final_url.rstrip("/").split("?")[0] == mirror.rstrip("/")
+                ):
+                    self._status(
+                        req, "scihub",
+                        f"镜像 {mirror} 未返回该 DOI 的检索页（HTTP {status}，"
+                        f"落地 {final_url[:60]}），按下载失败处理，尝试下一镜像",
+                    )
+                    continue
+            except Exception as exc:
+                self._status(
+                    req, "scihub",
+                    f"镜像 {mirror} 无法打开（{scihub.MIRROR_OPEN_BUDGET}s 预算内: "
+                    f"{type(exc).__name__} {str(exc)[:120]}），切换下一镜像",
+                )
+                continue
+
+            # 等待窗口内取检索结果并触发下载；无响应则刷新页面重试
+            # （延续“每页等待时间” / “无响应最大刷新次数”设置）
+            refreshes_left = max_refresh
+            while True:
+                info = await self._scihub_wait_result(page, req, window)
+                if info is not None:
+                    if info.get("pdfUrl"):
+                        got = await self._scihub_download_pdf(
+                            page, info["pdfUrl"], req, window
+                        )
+                        if got is not None:
+                            self._status(req, "scihub", f"Sci-Hub 下载成功（{mirror}）")
+                            return "download", got
+                        # PDF 直链无响应：落到下方“无响应刷新”逻辑重新触发
+                    else:  # notFound：检索结果页已成功打开并渲染、明确报告未收录
+                        # —— 确定性结论（镜像为同一后端），立即结束
+                        self._status(
+                            req, "scihub",
+                            f"镜像 {mirror} 检索页确认未收录该 DOI，"
+                            "转文献官方页面下载…",
+                        )
+                        return "not_indexed", None
+                # 刷新前先检查下载队列：等待/验证期间可能已有下载开始（验证通过
+                # 后自动重载、页面自动触发等），直接取用，避免刷新冲掉进行中下载
+                got = self._pop_download()
+                if got is not None:
+                    self._status(req, "scihub", f"Sci-Hub 下载成功（{mirror}）")
+                    return "download", got
+                if refreshes_left > 0:
+                    refreshes_left -= 1
+                    self._status(
+                        req, "scihub",
+                        f"页面在 {window // 60} 分钟内无响应，刷新页面"
+                        f"（剩余刷新次数 {refreshes_left}）",
+                    )
+                    try:
+                        await asyncio.wait_for(
+                            page.reload(wait_until="domcontentloaded"), timeout=90
+                        )
+                    except Exception:
+                        pass
+                    continue
+                self._status(
+                    req, "scihub",
+                    f"刷新 {max_refresh} 次（每轮 {window // 60} 分钟）后仍无响应，"
+                    f"尝试下一镜像",
+                )
+                break
+        self._status(
+            req, "scihub",
+            "Sci-Hub 全部镜像下载失败（未获得检索页的明确结论），"
+            "转文献官方页面下载…",
+        )
+        return "failed", None
+
+
+    async def _scihub_wait_result(self, page, req: dict, window: int):
+        """等待 Sci-Hub 检索结果渲染（最多 window 秒，即“每页等待时间”）。
+
+        返回 PAGE_STATE_JS 的结果 dict（含 pdfUrl / notFound / cf 等）；
+        预算耗尽仍无结论返回 None（由外层按“无响应”刷新页面重试）。
+        期间出现人机验证则在剩余预算内走自动点击循环（通过后重新检测）；
+        验证超时按无响应处理。验证阶段可能抛出的 NoAccessError（页面呈现出版商
+        无权限面板）不是 Sci-Hub 的“未收录”结论——Sci-Hub 页上不可信，一律按
+        该镜像无响应（下载失败）处理，不写任何权限记录。
+        """
+        deadline = time.monotonic() + window
+        while True:
+            if self.skip_event.is_set():
+                raise SkipRequested("已人工跳过该篇")
+            if self.stop_event.is_set():
+                raise StopRequested("下载已被停止")
+            if not self._downloads.empty():
+                return None  # 下载已在进行：由外层取走
+            try:
+                info = await asyncio.wait_for(
+                    page.evaluate(scihub.PAGE_STATE_JS), timeout=10
+                )
+            except Exception:
+                info = None
+            if info:
+                if info.get("pdfUrl") or info.get("notFound"):
+                    return info
+                if info.get("cf"):
+                    remaining = int(max(5, deadline - time.monotonic()))
+                    self._status(req, "auth", "Sci-Hub 镜像出现人机验证，自动验证中…")
+                    try:
+                        outcome = await self._challenge_wait(
+                            page, req, "Cloudflare 人机验证", remaining
+                        )
+                    except NoAccessError:
+                        # 出版商无权限面板出现在 Sci-Hub 页上不可信：
+                        # 按无响应处理（外层刷新重试），绝不映射为“未收录”
+                        return None
+                    if outcome == "cleared":
+                        continue  # 验证通过：重新检测页面状态
+                    return None  # 验证超时：放弃该镜像
+            if time.monotonic() >= deadline:
+                return None
+            await asyncio.sleep(2)
+
+    async def _scihub_download_pdf(self, page, pdf_url: str, req: dict, window: int):
+        """用浏览器会话下载 Sci-Hub 提供的 PDF 直链；成功返回 Download，失败 None。
+
+        等待下载开始的最长时间为 window（“每页等待时间”）；失败返回 None，
+        由外层按“无响应”刷新页面重新触发。带来源页 Referer 导航（文件源
+        可能校验 Referer）；download=true 参数强制附件下载（触发下载事件）；
+        若文件源返回 inline PDF（无附件头），按 PDF 浏览页直接取回字节
+        （等效人工点“保存”）。
+        """
+        url = scihub.ensure_download_param(pdf_url)
+        referrer = page.url or ""
+        self._status(req, "scihub", "Sci-Hub 命中，正在下载 PDF…")
+        resp = None
+        try:
+            resp = await asyncio.wait_for(
+                page.goto(url, referer=referrer, wait_until="commit", timeout=60000),
+                timeout=65,
+            )
+        except Exception:
+            resp = None  # 下载接管导航（ERR_ABORTED）属预期
+        if resp is not None:
+            try:
+                if resp.status >= 400:
+                    self._status(req, "scihub", f"PDF 直链返回 HTTP {resp.status}，放弃该镜像")
+                    return None
+            except Exception:
+                pass
+        start = time.monotonic()
+        html_checked = False
+        deadline = start + window
+        while time.monotonic() < deadline:
+            if not self._downloads.empty():
+                return self._pop_download()
+            if self.skip_event.is_set():
+                raise SkipRequested("已人工跳过该篇")
+            if self.stop_event.is_set():
+                raise StopRequested("下载已被停止")
+            # inline PDF 浏览页兜底（文件源未返回附件头时）
+            await self._maybe_grab_inline_pdf(self._pick_active_page(page), req)
+            # 20s 后仍无下载：检查是否落到了 HTML 页面（403/404 错误页）
+            if not html_checked and time.monotonic() - start > 20:
+                html_checked = True
+                try:
+                    html = await asyncio.wait_for(
+                        page.evaluate(
+                            "() => ((document.documentElement && "
+                            "document.documentElement.outerHTML) || '').slice(0, 300)"
+                        ),
+                        timeout=5,
+                    )
+                except Exception:
+                    html = ""
+                if html and "<html" in html.lower():
+                    self._status(req, "scihub", "PDF 直链返回了 HTML 页面（非 PDF），放弃该镜像")
+                    return None
+            await asyncio.sleep(1)
+        return None
 
     async def _run_task(self, page, paper: Paper, req: dict, window: int, max_refresh: int):
         """打开页面并按 等待/刷新/人工干预 循环触发下载，返回完成的 Download。
@@ -559,6 +939,9 @@ class BrowserWorker:
                 continue
 
             await self._trigger_download(page, paper, req)
+            # 触发下载后立刻复查：出版商无权下载时（购买/机构登录面板、重定向到摘要页）
+            # 立即跳过该篇，不再进入整轮等待
+            await self._raise_if_no_access(page)
             outcome = await self._wait_window(
                 page, req, window,
                 retry_trigger=lambda: self._trigger_download(page, paper, req),
@@ -590,9 +973,14 @@ class BrowserWorker:
     async def _handle_auth(self, page, req: dict, reason: str, window: int) -> str:
         """按验证类型分派：人机验证走自动点击循环（受窗口约束），登录页等待人工处理。
 
+        无访问权限（付费墙）不等待、不重试，直接抛 NoAccessError 跳过该篇。
         返回 "download"（已开始下载）/"cleared"（已通过）/"timeout"（窗口/人工等待超时），
         人工跳过 / 停止以异常抛出。
         """
+        if reason == NO_ACCESS_REASON:
+            raise NoAccessError(
+                "出版商页面显示当前会话没有该文献的访问权限（需购买或机构登录），已立即跳过该篇"
+            )
         if reason in CHALLENGE_REASONS:
             return await self._challenge_wait(page, req, reason, window)
         return await self._human_intervention(page, req, reason)
@@ -602,15 +990,19 @@ class BrowserWorker:
     ) -> str:
         """人机验证循环（受本轮等待窗口约束，时间计入“每页等待时间”）：
 
-        - 每 verify_interval_s 秒对验证控件模拟点击一次（Turnstile / reCAPTCHA 等）；
-        - 连续 verify_max_fails 次点击仍未通过 → 刷新页面，等待重新验证；
+        - 先被动等待 CF_PASSIVE_GRACE_SECONDS 秒：Cloudflare 托管型验证无需点击、
+          会自动完成（实测约 5-20s），期间任何点击/刷新都会重启验证、导致永远无法完成；
+        - 超过被动等待仍未通过（存在必须点击的交互式验证控件）时，每 verify_interval_s 秒
+          对验证控件模拟点击一次；连续 verify_max_fails 次点击仍未通过 → 刷新页面重新验证
+          （刷新后重新进入被动等待）；
         - 窗口耗尽仍未通过 → 返回 "timeout"，由外层按“无响应”逻辑刷新或放弃；
         - 期间检测到下载开始 → 返回 "download"；验证通过（连续两次干净检测）→ "cleared"。
         """
         verify_interval = int(req.get("verify_interval_s") or 5)
         verify_max_fails = int(req.get("verify_max_fails") or 5)
         deadline = time.monotonic() + window
-        next_click = time.monotonic() + 1  # 给验证页 1s 渲染时间，然后立即点击一次
+        next_click = time.monotonic() + 1  # 给验证页 1s 渲染时间，然后立即处理一次
+        passive_until = time.monotonic() + CF_PASSIVE_GRACE_SECONDS
         fails = 0
         clean_streak = 0
         next_check = 0.0  # 验证状态检测节流（见循环内注释）
@@ -632,6 +1024,7 @@ class BrowserWorker:
                     pass
                 fails = 0
                 next_click = time.monotonic() + 5
+                passive_until = time.monotonic() + CF_PASSIVE_GRACE_SECONDS
                 clean_streak = 0
             if time.monotonic() >= deadline:
                 self._status(
@@ -647,6 +1040,13 @@ class BrowserWorker:
                 continue
             next_check = now + 2
             state = await self._detect_auth(page)
+            if state == NO_ACCESS_REASON:
+                # 验证已通过/跳转后落到出版商的无权限页（购买/机构登录面板）：
+                # 刷新与点击都无解，立即跳过该篇
+                raise NoAccessError(
+                    "已通过人机验证，但出版商显示当前会话没有该文献的访问权限"
+                    "（需购买或机构登录），已立即跳过该篇"
+                )
             if state is None:
                 # 需连续两次干净检测（间隔 > 1s）才认定验证通过，避免页面跳转瞬间误判
                 clean_streak += 1
@@ -656,37 +1056,57 @@ class BrowserWorker:
                 continue
             clean_streak = 0
             if now >= next_click:
-                try:
-                    await self._try_auto_verify(page)
-                except Exception:
-                    pass
-                # 点击后挑战仍在 = 一次失败尝试（无论是否命中验证控件）：
-                # 保证“每 N 次失败刷新页面”与状态进度一定持续推进
-                fails += 1
-                if fails >= verify_max_fails:
-                    fails = 0
+                if now < passive_until:
+                    # 被动等待期：托管型验证无需点击、会自动完成；不点击、不计失败
                     self._status(
                         req, "auth",
-                        f"人机验证连续 {verify_max_fails} 次点击未通过，刷新页面等待重新验证"
-                        "（也可在浏览器窗口中手动完成验证；验证可能出现在弹出的子窗口中，"
-                        "请勿点击子窗口以外区域，以免子窗口被网站自动关闭）",
+                        "人机验证自动进行中（托管型验证无需点击），等待验证完成；"
+                        "也可在浏览器窗口/子窗口中手动完成验证，通过后自动继续",
                     )
-                    try:
-                        await asyncio.wait_for(
-                            page.reload(wait_until="domcontentloaded"), timeout=90
-                        )
-                    except Exception:
-                        pass
-                    next_click = time.monotonic() + 5
-                else:
-                    self._status(
-                        req, "auth",
-                        f"人机验证中：每 {verify_interval}s 模拟点击一次（第 {fails}"
-                        f"/{verify_max_fails} 次尝试，{verify_max_fails} 次未通过将刷新页面）；"
-                        "也可在浏览器窗口/子窗口中手动完成验证，通过后无需任何操作会自动继续",
-                    )
-                    # 用当前时间调度，避免页面检测耗时把点击间隔越拖越长
                     next_click = time.monotonic() + verify_interval
+                else:
+                    try:
+                        clicked = await self._try_auto_verify(page)
+                    except Exception:
+                        clicked = False
+                    if not clicked:
+                        # 页面没有可点击的验证控件：继续被动等待，不刷新
+                        # （刷新会重启验证流程，反而永远无法完成）
+                        self._status(
+                            req, "auth",
+                            "人机验证自动进行中（未找到可点击的验证控件），等待验证完成；"
+                            "也可在浏览器窗口/子窗口中手动完成验证，通过后自动继续",
+                        )
+                        next_click = time.monotonic() + verify_interval
+                    else:
+                        # 点击后挑战仍在 = 一次失败尝试（无论是否命中验证控件）：
+                        # 保证“每 N 次失败刷新页面”与状态进度一定持续推进
+                        fails += 1
+                        if fails >= verify_max_fails:
+                            fails = 0
+                            self._status(
+                                req, "auth",
+                                f"人机验证连续 {verify_max_fails} 次点击未通过，刷新页面等待重新验证"
+                                "（也可在浏览器窗口中手动完成验证；验证可能出现在弹出的子窗口中，"
+                                "请勿点击子窗口以外区域，以免子窗口被网站自动关闭）",
+                            )
+                            try:
+                                await asyncio.wait_for(
+                                    page.reload(wait_until="domcontentloaded"), timeout=90
+                                )
+                            except Exception:
+                                pass
+                            next_click = time.monotonic() + 5
+                            passive_until = time.monotonic() + CF_PASSIVE_GRACE_SECONDS
+                        else:
+                            self._status(
+                                req, "auth",
+                                f"人机验证中：每 {verify_interval}s 模拟点击一次（第 {fails}"
+                                f"/{verify_max_fails} 次尝试，{verify_max_fails} 次未通过将刷新页面）；"
+                                "也可在浏览器窗口/子窗口中手动完成验证，通过后无需任何操作会自动继续",
+                            )
+                            # 用当前时间调度，避免页面检测耗时把点击间隔越拖越长
+                            next_click = time.monotonic() + verify_interval
             await asyncio.sleep(0.5)
 
     # ------------------------------------------------------------------
@@ -722,6 +1142,8 @@ class BrowserWorker:
             for _ in range(6):  # 每个动作后最多观察 6s，确认下载是否开始
                 if not self._downloads.empty():
                     return True
+                # 每秒顺带检测无权限页：无权下载时立即抛出跳过，不空等 6s
+                await self._raise_if_no_access(page)
                 await asyncio.sleep(1)
             return not self._downloads.empty()
 
@@ -781,21 +1203,45 @@ class BrowserWorker:
         for sel in CLICK_SELECTORS:
             try:
                 loc = page.locator(sel).first
-                if await loc.count() and await loc.is_visible():
-                    candidates.append(loc)
-                    break
+                if not (await loc.count() and await loc.is_visible()):
+                    continue
+                # 排除指向插图/附图的链接（如 eLife 页面 figure 的 PDF 版本），
+                # 避免把图片当成文章 PDF 下载
+                try:
+                    href = await loc.get_attribute("href") or ""
+                except Exception:
+                    href = ""
+                if _FIGURE_LINK_RE.search(href):
+                    continue
+                candidates.append((loc, href))
+                break
             except Exception:
                 continue
         if not candidates:
             try:
                 link = page.get_by_role("link", name=re.compile(r"pdf", re.IGNORECASE)).first
                 if await link.count() and await link.is_visible():
-                    candidates.append(link)
+                    try:
+                        lhref = await link.get_attribute("href") or ""
+                    except Exception:
+                        lhref = ""
+                    if not _FIGURE_LINK_RE.search(lhref):
+                        candidates.append((link, lhref))
             except Exception:
                 pass
-        for loc in candidates[:2]:
+        for loc, href in candidates[:2]:
             if await attempt("点击文章页上的 PDF 链接", lambda l=loc: l.click(timeout=10000)):
                 return
+            # 点击未生效（出版商用 JS 拦截点击事件，如 eLife 的 “Article PDF” 链接）：
+            # 直接导航到链接地址（带来源 Referer），等效用户右键“在新标签页打开”
+            if href and href.startswith("http"):
+                if await attempt(
+                    f"直接访问页面 PDF 入口 {href[:80]}",
+                    lambda u=href, r=referrer: page.goto(
+                        u, referer=r, wait_until="commit", timeout=60000
+                    ),
+                ):
+                    return
 
         # 3) citation_pdf_url（页面 meta 声明的 PDF 地址）
         try:
@@ -836,6 +1282,48 @@ class BrowserWorker:
                 hint = f"；页面: {(page.url or '')[:90]}"
             self._status(req, "waiting", "本轮未找到可用的下载入口，继续等待页面加载/重试" + hint)
 
+    async def _maybe_grab_inline_pdf(self, page, req: dict | None) -> bool:
+        """当前页面是浏览器内置 PDF 浏览页时，直接取回文件内容保存。
+
+        Edge / Chrome 对 inline PDF（Content-Type: application/pdf 且无附件头）
+        不触发下载事件，而是进入内置 PDF 浏览页——并非没有下载连接，真人点一下
+        浏览页的“保存”即可下载。这里用浏览器会话（带 Cookie / 指纹）直接 GET 该
+        地址取回字节，校验 %PDF 魔数后以伪 Download 入队，等效于点了“保存”。
+        成功入队返回 True；不是 PDF 浏览页或取回失败返回 False。
+        """
+        url = (page.url or "").strip()
+        if not url.lower().split("?", 1)[0].endswith(".pdf"):
+            return False
+        if url in self._pdf_grab_tried:
+            return False
+        self._pdf_grab_tried.add(url)
+        if req is not None:
+            self._status(req, "saving", "页面为 PDF 浏览页（无下载事件），直接取回文件内容保存…")
+        try:
+            resp = await asyncio.wait_for(
+                # 与浏览器上下文共享 Cookie 的 API 请求；带 referer 降低被拦概率
+                self._context.request.get(url, headers={"referer": url}, timeout=60000),
+                timeout=65,
+            )
+            body = await resp.body()
+        except Exception:
+            return False
+        if not body or b"%PDF-" not in body[:1024] or b"%%EOF" not in body[-2048:]:
+            return False  # 拿到的不是完整 PDF（HTML 错误页 / 截断），交回常规流程
+        filename = os.path.basename(urlparse(url).path) or "paper.pdf"
+        fd, tmp_name = tempfile.mkstemp(suffix=".pdf", prefix="pdl-inline-")
+        try:
+            with os.fdopen(fd, "wb") as f:
+                f.write(body)
+        except Exception:
+            try:
+                os.unlink(tmp_name)
+            except OSError:
+                pass
+            return False
+        self._downloads.put_nowait(_DirectPdfDownload(Path(tmp_name), filename))
+        return True
+
     async def _wait_window(self, page, req: dict, window: int, retry_trigger=None) -> str:
         """在一个等待窗口内监听：下载事件 / 跳过 / 停止 / 出现登录验证 / 超时。
 
@@ -859,6 +1347,10 @@ class BrowserWorker:
                     await retry_trigger()
             if now >= next_auth_check:
                 next_auth_check = now + 5
+                # Edge / Chrome 的 inline PDF 浏览页不产生下载事件：
+                # 检测到当前页是 PDF 浏览页时直接取回内容保存（等效人工点“保存”）
+                if await self._maybe_grab_inline_pdf(page, req):
+                    return "download"
                 reason = await self._detect_auth(page)
                 # "unknown"（页面正在跳转）不算发现验证，下一周期再检测
                 if reason and reason != "unknown":
@@ -919,7 +1411,8 @@ class BrowserWorker:
                     return True
             except Exception:
                 continue
-        # 3) iframe 内 body 的复选框位置点击
+        # 3) iframe 内 body 的复选框位置点击（仅可见的验证控件；隐藏的挑战 iframe 不点击，
+        #    托管型验证无需点击、会自动完成）
         try:
             for frame in page.frames:
                 url = (frame.url or "").lower()
@@ -931,18 +1424,18 @@ class BrowserWorker:
                 x, y = (30, 39) if "recaptcha" in url else (28, 33)
                 try:
                     body = frame.locator("body").first
-                    if await body.count():
+                    if await body.count() and await body.is_visible():
                         await body.click(timeout=3000, position={"x": x, "y": y})
                         return True
                 except Exception:
                     continue
         except Exception:
             pass
-        # 4) 页面级验证按钮 / 复选框（非 iframe 形态，如简单的“点击验证”）
+        # 4) 页面级验证按钮 / 复选框（非 iframe 形态，如简单的“点击验证”）。
+        #    注意：只匹配自定义控件文案，不能匹配 Cloudflare 验证页的固定文案
+        #    （"verify you are human" 等——那是托管型验证页的说明文字，点击会打断验证）
         for pattern in (
-            r"verify you are human",
             r"i'?m not a robot",
-            r"confirm you'?re human",
             r"我不是机器人",
             r"点击.{0,4}(验证|确认)",
         ):
@@ -993,6 +1486,12 @@ class BrowserWorker:
             if deadline is not None and time.monotonic() >= deadline:
                 return "timeout"
             state = await self._detect_auth(page)
+            if state == NO_ACCESS_REASON:
+                # 登录/验证流程结束后落到出版商的无权限页（购买/机构登录面板）：
+                # 即使人工登录也无权下载，立即跳过该篇
+                raise NoAccessError(
+                    "登录后出版商仍显示当前会话没有该文献的访问权限（需购买或机构登录），已立即跳过该篇"
+                )
             if state is None:
                 # 连续两次干净检测才认定已通过：页面跳转瞬间的检测失败（unknown）
                 # 不能当成“验证已通过”，否则会在验证完成前导航离开、打断验证
@@ -1006,7 +1505,7 @@ class BrowserWorker:
 
     @staticmethod
     async def _detect_auth(page) -> str | None:
-        """识别登录页 / 人机验证 / 反爬拦截页。
+        """识别登录页 / 人机验证 / 反爬拦截页 / 无访问权限（付费墙）。
 
         返回原因描述；页面正常且无验证时返回 None；
         页面正在跳转/重载导致无法判定时返回 "unknown"（调用方必须视为“仍在验证”，
@@ -1025,11 +1524,23 @@ class BrowserWorker:
             return "Cloudflare 人机验证"
         if signals.get("pwd"):
             return "登录页（需要输入密码）"
+        # 付费墙优先于“访问受限/反爬拦截”判定：无权下载刷新无解，必须立即跳过；
+        # 登录页优先于付费墙判定——带密码输入框的登录页可能同时展示购买/机构登录选项，
+        # 留给人工处理（登录后可能就有权限）
+        if signals.get("paywall") or _ABS_REDIRECT_RE.search(url):
+            return NO_ACCESS_REASON
         if signals.get("denied"):
             return "访问受限/反爬拦截页"
         if _AUTH_URL_RE.search(url):
             return "登录/身份验证页"
         return None
+
+    async def _raise_if_no_access(self, page) -> None:
+        """页面显示无访问权限（付费墙）时立即抛出 NoAccessError，由 fetch 转为跳过该篇。"""
+        if await self._detect_auth(page) == NO_ACCESS_REASON:
+            raise NoAccessError(
+                "出版商页面显示当前会话没有该文献的访问权限（需购买或机构登录），已立即跳过该篇"
+            )
 
     # ------------------------------------------------------------------
     # 下载完成后的落地
@@ -1043,8 +1554,13 @@ class BrowserWorker:
         paper: Paper,
         meta: dict,
         generate_info: bool,
-    ) -> tuple[Path, Path | None]:
-        """把浏览器下载的原始文件按命名规则移动/重命名到目标目录，并生成信息文件。"""
+        source: str = "publisher",
+    ) -> tuple[Path, Path | None, Path]:
+        """把浏览器下载的原始文件按命名规则移动/重命名到目标目录，并生成信息文件与权限记录。
+
+        source 为下载来源（"sci-hub" / "publisher"）：下载成功即该路径权限确认，
+        按来源写入对应权限字段（合并语义保留另一路径的已知状态）。
+        """
         target_dir.mkdir(parents=True, exist_ok=True)
         final_pdf = target_dir / f"{stem}.pdf"
         if final_pdf.exists():
@@ -1059,7 +1575,13 @@ class BrowserWorker:
         info_path = None
         if generate_info:
             info_path = write_info_file(paper, target_dir / f"{stem}.txt", extra=meta or {})
-        return final_pdf, info_path
+        # 下载成功即该路径权限确认：写入权限记录（双路径权限），供下载前扫描
+        # （始终开启）判断——仅当 official=denied 且 scihub=unavailable 才跳过
+        if source == "sci-hub":
+            access_path = write_access_marker(paper, target_dir, stem, scihub="available")
+        else:
+            access_path = write_access_marker(paper, target_dir, stem, official="granted")
+        return final_pdf, info_path, access_path
 
     # ------------------------------------------------------------------
     # worker 主循环

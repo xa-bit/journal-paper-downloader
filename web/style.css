@@ -169,6 +169,15 @@ body {
   font-size: 14px;
 }
 
+/* 树内复选框：加大命中区域，避免“点击勾选无反应”的误判 */
+.tree-node input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  margin: 0 2px;
+  cursor: pointer;
+  accent-color: var(--primary);
+}
+
 .tree-node.root {
   font-weight: 600;
 }
@@ -470,6 +479,11 @@ body {
   color: var(--error);
 }
 
+.status.noaccess {
+  color: var(--muted);
+  font-style: italic;
+}
+
 .dl-title {
   flex: 1;
   min-width: 0;
@@ -548,4 +562,184 @@ button:disabled {
 
 .hidden {
   display: none !important;
+}
+
+/* ---------------------------------------------------------------------------
+ * 期刊库弹窗
+ * ------------------------------------------------------------------------- */
+
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(15, 23, 42, 0.45);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 100;
+  padding: 24px;
+}
+
+.modal {
+  background: var(--card-bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  width: 100%;
+  max-width: 760px;
+  max-height: calc(100vh - 80px);
+  display: flex;
+  flex-direction: column;
+  padding: 18px 20px;
+  gap: 12px;
+}
+
+.modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.modal-header h3 {
+  font-size: 16px;
+}
+
+.modal-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.library-add {
+  display: flex;
+  gap: 8px;
+}
+
+.library-add input {
+  flex: 1;
+}
+
+.library-candidates {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 180px;
+  overflow-y: auto;
+  border: 1px dashed var(--border);
+  border-radius: 8px;
+  padding: 8px 10px;
+}
+
+.library-candidate {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 13px;
+}
+
+.library-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.library-toolbar input[type="text"] {
+  flex: 1;
+  min-width: 180px;
+}
+
+.lib-select-all {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.library-list {
+  flex: 1;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px;
+  min-height: 120px;
+}
+
+.library-row {
+  display: grid;
+  grid-template-columns: auto 1.1fr 1.6fr auto auto auto;
+  gap: 10px;
+  align-items: center;
+  font-size: 13px;
+  padding: 4px 6px;
+  border-bottom: 1px solid var(--bg);
+}
+
+.library-row:last-child {
+  border-bottom: none;
+}
+
+.library-row.editing {
+  grid-template-columns: 1.1fr 1.6fr auto auto auto;
+}
+
+.library-row input[type="text"] {
+  width: 100%;
+  font-size: 13px;
+  padding: 5px 8px;
+}
+
+.lib-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 500;
+}
+
+.lib-url {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--muted);
+}
+
+.lib-issn {
+  color: var(--muted);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.library-row button {
+  padding: 4px 10px;
+  font-size: 13px;
+}
+
+/* 清单栏“全选”（整刊勾选所有已检索期刊） */
+.select-all-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  white-space: nowrap;
+  cursor: pointer;
+  user-select: none;
+}
+
+.select-all-label input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  cursor: pointer;
+  accent-color: var(--primary);
+}
+
+/* 卷目录状态条中的“检索全部卷”按钮 */
+.load-bar .scan-more-btn {
+  padding: 3px 10px;
+  font-size: 12px;
+  margin-left: 8px;
 }

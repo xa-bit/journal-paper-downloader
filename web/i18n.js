@@ -19,19 +19,48 @@ const I18N = {
     // 模块一：文献检索
     search_title: "文献检索",
     url_input_ph:
-      "期刊网址，如 https://agupubs.onlinelibrary.wiley.com/journal/19448007 或 https://www.nature.com/ngeo/",
-    url_input_ph_short: "期刊网址，如 https://www.nature.com/ngeo/",
+      "期刊网址或 ISSN，如 https://agupubs.onlinelibrary.wiley.com/journal/19448007、https://www.nature.com/ngeo/ 或 1944-8007",
+    url_input_ph_short: "期刊网址或 ISSN，如 https://www.nature.com/ngeo/",
     remove_row: "删除该行",
     add_url: "＋ 增加期刊网址",
-    split_urls: "⇱ 分离多网址行",
+    open_library: "📚 期刊库",
+    open_library_tip:
+      "打开期刊库：全选或依次勾选期刊，把地址批量导入检索栏；也可手动添加（联网搜索确认）、编辑或删除期刊",
     search_journals: "检索期刊",
     multi_url_hint:
-      "支持一次输入多个期刊；单行内粘贴多个网址（空格 / 逗号 / 换行分隔）后点“分离多网址行”可自动拆成多行。",
+      "支持一次输入多个期刊（网址或 ISSN）；也可打开期刊库，全选或依次勾选后批量导入检索栏。",
     detail_empty: "点击文章标题，在此查看详情。",
     save_manifest: "生成下载清单",
     export_list: "保存任务清单",
     export_list_tip:
-      "把当前任务清单保存为文件（任务清单-期刊名.json，重名自动加序号），并通过浏览器下载",
+      "按期刊把当前任务清单保存为文件（任务清单-期刊名.json，每刊一份，同名覆盖），并通过浏览器下载",
+
+    // 期刊库
+    lib_title: "📚 期刊库",
+    lib_close: "关闭",
+    lib_add_ph: "手动添加：输入期刊名称或网址，联网搜索确认对应的期刊及可用地址",
+    lib_search: "联网搜索",
+    lib_searching: "联网检索中…",
+    lib_no_candidates: "没有找到可用的期刊候选{msg}",
+    lib_search_fail: "联网搜索失败：{msg}",
+    lib_add: "添加",
+    lib_add_tip: "把该候选期刊加入期刊库",
+    lib_add_empty: "请先输入期刊名称或网址",
+    lib_filter_ph: "按期刊名 / ISSN 筛选",
+    lib_select_all: "全选",
+    lib_count: "共 {n} 本期刊，已勾选 {sel} 本",
+    lib_empty: "期刊库为空，可在上方手动添加，或直接在检索栏输入网址检索。",
+    lib_name_ph: "期刊名称",
+    lib_url_ph: "期刊网址（可用于检索；留空则按 ISSN 导入）",
+    lib_save_edit: "保存修改",
+    lib_cancel_edit: "取消编辑",
+    lib_edit_tip: "编辑期刊名称 / 检索地址（地址变更时自动联网重新确认 ISSN）",
+    lib_del_tip: "从期刊库删除该期刊",
+    lib_no_url: "（无网址，按 ISSN 检索）",
+    lib_footer_hint: "勾选后导入检索栏；✎ 编辑地址、✕ 删除条目（立即保存）",
+    lib_import: "导入所选至检索栏",
+    lib_imported: "✔ 已从期刊库导入 {n} 个期刊地址至检索栏",
+    lib_load_fail: "期刊库读写失败：{msg}",
 
     // 模块二：扫盘与下载
     scan_title: "扫盘与下载",
@@ -39,8 +68,9 @@ const I18N = {
     local_root_hint_html:
       "下载将在本地目录下按 <code>期刊名/出版卷/文章名/</code> 逐级生成子文件夹；PDF 以 DOI 尾缀命名（如 <code>2025JC023188.pdf</code>），并同时生成同名 <code>.txt</code> 信息文件（标题、日期、作者、DOI 等）。",
     browser_label: "浏览器选择（下载由浏览器自动化完成，按所选浏览器启动）",
-    opt_edge: "Edge（默认，通过反爬验证率最高）",
+    opt_chrome: "Chrome（默认）",
     opt_auto: "自动（优先本机 Chrome / Edge / 内置 Chromium）",
+    opt_edge: "Edge",
     opt_firefox: "Firefox（易被 Cloudflare 识别，不推荐）",
     opt_safari: "Safari（WebKit 引擎）",
     browser_hint_html:
@@ -50,17 +80,20 @@ const I18N = {
     verify_interval: "验证点击间隔（秒）",
     verify_max_fails: "验证失败几次后刷新",
     task_interval: "任务间隔（秒）",
-    gen_info: "生成信息文件",
+    auto_access_hint_html:
+      "每次下载都会自动生成信息文件，并确认该文献的访问权限，在其保存目录写入权限记录文件（<code>DOI尾缀.access.json</code>），记录包含两个权限：官方网页权限（出版商允许 / 拒绝访问）与 Sci-Hub 是否收录。下载前自动扫描该记录：仅当两者都被标记为“无”时才直接跳过该篇（删除记录文件后可重试）；否则默认优先用 Sci-Hub 检索下载，失败再转出版商官方页面。",
     auto_hint:
       "浏览器自动化会打开真实浏览器窗口：等待时间内无下载响应会自动刷新（超过刷新次数后跳过该篇）；遇到人机验证时每“验证点击间隔”秒自动模拟点击一次验证，连续“验证失败几次后刷新”次未通过会刷新页面重新验证（这些时间都算在每页等待时间内）；遇到登录身份验证时页面保持打开，等待你在浏览器中手动处理后自动继续。",
     import_ph:
-      "输入任务清单文件路径后导入，如 /mnt/d/paper/任务清单-Nature.json（相对路径按网站根目录解析）",
+      "输入任务清单路径后导入（多份用逗号 / 分号 / 换行分隔）；留空并点击按钮可直接选择文件批量导入",
     import_list: "导入任务清单",
-    import_list_tip: "按路径载入任务清单，并设为当前待执行清单",
+    import_list_tip:
+      "输入框有路径时按路径导入（可多份）；输入框为空时打开文件选择器，一次选多份清单批量导入",
+    import_reading: "正在读取 {n} 份清单文件…",
     gen_undone: "生成未下载清单",
     gen_undone_tip:
-      "按本地目录扫盘结果，把当前清单里未下载的条目生成为新的任务清单并自动切换使用",
-    save_list_tip: "把当前待执行的任务清单保存为文件（任务清单-期刊名.json，重名自动加序号）",
+      "按本地目录扫盘结果，把当前清单里未下载的条目按期刊分别生成新的任务清单并自动切换使用",
+    save_list_tip: "把当前待执行的任务清单按期刊分别保存为文件（任务清单-期刊名.json，同名覆盖）",
     list_persist_hint:
       "网站打开时自动使用上次任务所用清单；在上方“文献检索”生成清单、此处导入清单或生成未下载清单后，当前待执行清单会自动切换并持久化（清单内显示文件路径）。",
     scan_local: "扫描本地目录",
@@ -79,7 +112,7 @@ const I18N = {
     auth_skip: "跳过此篇",
 
     // 树形目录
-    root_title_tip: "点击展开/收起卷目录",
+    root_title_tip: "点击展开/收起卷目录（只加载一页，完整检索在生成下载清单时自动进行）",
     vol_label_tip: "点击加载/收起该卷文献",
     count_pcs: "{sel} / {total} 篇",
     root_volumes_suffix: "，共 {n} 卷",
@@ -88,7 +121,12 @@ const I18N = {
     works_loading: "文献加载中…",
     scan_done_bar: "共 {n} 卷，已扫描 {m} 篇文献",
     scan_progress_bar: "卷目录检索中：已扫描 {loaded} / 约 {total} 篇（再点击期刊名可收起并暂停）",
+    vol_partial_bar:
+      "已加载 {loaded} / 约 {total} 篇的卷目录；点“生成下载清单”会自动补全检索整本期刊，无需等待。",
+    scan_more: "检索全部卷",
     vol_incomplete: "期刊卷目录仍在检索中，该卷文献可能不全（稍候自动补全）。",
+    select_all: "全选",
+    select_all_tip: "勾选/取消当前检索到的所有期刊（整刊全选，生成清单时自动补全检索）",
 
     // 详情面板
     dt_date: "日期",
@@ -117,7 +155,7 @@ const I18N = {
     manifest_prepared: "清单准备中：《{t}》已完整检索（{n} 篇），正在汇总…",
     manifest_generating: "正在生成清单…",
     save_failed: "保存失败",
-    manifest_cached: "✔ 清单已缓存（{n} 篇），请到下方“扫盘与下载”模块操作。",
+    manifest_cached: "✔ 清单已生成（共 {n} 篇，按期刊拆分为 {f} 份：{names}），请到下方“扫盘与下载”模块操作。",
     save_fail_prefix: "保存失败：",
     no_manifest: "当前没有任务清单，请先生成或导入。",
     journal_sep: "、",
@@ -126,7 +164,7 @@ const I18N = {
     list_count_part: " ｜ {n} 篇",
     generated_at: " ｜ 生成于 {t}",
     from_undone: " ｜ 来源：未下载清单",
-    file_label: " ｜ 文件: ",
+    files_label: " ｜ 清单文件 {n} 份：{names}",
     list_default_filename: "任务清单.json",
     read_manifest_fail: "读取清单失败",
     export_ok: "✔ 任务清单已保存（{n} 篇）：{p}，并已通过浏览器下载",
@@ -150,10 +188,15 @@ const I18N = {
     st_missing: "✘ 缺失",
     with_txt: "（含信息文件）",
     without_txt: "（缺信息文件，重新下载时会重新生成）",
+    access_denied_note: "（权限记录：官方网页与 Sci-Hub 均标记为无，下载时直接跳过）",
+    pdf_invalid_note: "（PDF 文件异常，已视为未下载，可重新下载）",
+    scan_denied_suffix: "，其中 {n} 篇官方网页与 Sci-Hub 均标记为无（下载时直接跳过）",
     st_downloading: "⏳ 下载中",
-    downloading_n: "下载中… 第 {i} / {n} 篇（成功 {ok}，失败 {fail}）",
+    downloading_n: "下载中… 第 {i} / {n} 篇（成功 {ok}，失败 {fail}，无权限 {na}）",
     st_ok: "✔ 成功",
     st_fail: "✘ 失败",
+    st_no_access: "⊘ 无权限",
+    no_access_default: "无访问权限（需购买或机构登录），已自动跳过该篇",
     ba_prefix: "［浏览器自动化］",
     info_file_suffix: "（信息文件: {p}）",
     unknown_error: "未知错误",
@@ -161,7 +204,7 @@ const I18N = {
     interval_wait: "任务间隔中（{s} 秒）… 已完成 {done} / {n} 篇",
     st_paused: "⏸ 已停止",
     stopped_summary: "已停止：完成 {done} / {n} 篇，点“继续下载”从当前条目重新下载",
-    done_summary: "下载完成：成功 {ok}，失败 {fail}，跳过已存在 {skip} 篇",
+    done_summary: "下载完成：成功 {ok}，失败 {fail}，无权限跳过 {na}，已存在跳过 {skip} 篇",
     refreshed: "已刷新，正在重新扫盘…",
     stopping: "正在停止当前下载…",
     open_dir_failed: "打开目录失败",
@@ -179,19 +222,48 @@ const I18N = {
     // Module 1: Literature Search
     search_title: "Literature Search",
     url_input_ph:
-      "Journal URL, e.g. https://agupubs.onlinelibrary.wiley.com/journal/19448007 or https://www.nature.com/ngeo/",
-    url_input_ph_short: "Journal URL, e.g. https://www.nature.com/ngeo/",
+      "Journal URL or ISSN, e.g. https://agupubs.onlinelibrary.wiley.com/journal/19448007, https://www.nature.com/ngeo/ or 1944-8007",
+    url_input_ph_short: "Journal URL or ISSN, e.g. https://www.nature.com/ngeo/",
     remove_row: "Remove this row",
     add_url: "＋ Add journal URL",
-    split_urls: "⇱ Split multi-URL row",
+    open_library: "📚 Journal Library",
+    open_library_tip:
+      "Open the journal library: select all or pick journals to import their URLs into the search bar; you can also add (confirmed via online search), edit or remove journals",
     search_journals: "Search Journals",
     multi_url_hint:
-      "You can enter several journals at once; paste multiple URLs into one row (separated by spaces / commas / newlines) and click “Split multi-URL row” to split them into rows automatically.",
+      "You can enter several journals at once (URL or ISSN); or open the journal library and import selected journals into the search bar in batch.",
     detail_empty: "Click an article title to view its details here.",
     save_manifest: "Generate Download List",
     export_list: "Save Task List",
     export_list_tip:
-      "Save the current task list to a file (task-list-<journal>.json, auto-numbered on name clashes) and download it via the browser",
+      "Save the current task list per journal (task list files, one per journal, overwriting on name clashes) and download them via the browser",
+
+    // Journal library
+    lib_title: "📚 Journal Library",
+    lib_close: "Close",
+    lib_add_ph: "Add manually: enter a journal name or URL, then search online to confirm the journal and its usable address",
+    lib_search: "Search Online",
+    lib_searching: "Searching online…",
+    lib_no_candidates: "No usable journal candidates found{msg}",
+    lib_search_fail: "Online search failed: {msg}",
+    lib_add: "Add",
+    lib_add_tip: "Add this candidate journal to the library",
+    lib_add_empty: "Enter a journal name or URL first",
+    lib_filter_ph: "Filter by journal name / ISSN",
+    lib_select_all: "Select all",
+    lib_count: "{n} journals, {sel} selected",
+    lib_empty: "The library is empty. Add journals above, or type URLs in the search bar directly.",
+    lib_name_ph: "Journal name",
+    lib_url_ph: "Journal URL (used for search; leave empty to import by ISSN)",
+    lib_save_edit: "Save changes",
+    lib_cancel_edit: "Cancel editing",
+    lib_edit_tip: "Edit the journal name / search URL (a changed URL is re-confirmed online for its ISSN)",
+    lib_del_tip: "Remove this journal from the library",
+    lib_no_url: "(no URL; searched by ISSN)",
+    lib_footer_hint: "Select journals to import into the search bar; ✎ edit URL, ✕ remove entry (saved immediately)",
+    lib_import: "Import Selected into Search Bar",
+    lib_imported: "✔ Imported {n} journal URL(s) from the library into the search bar",
+    lib_load_fail: "Journal library read/write failed: {msg}",
 
     // Module 2: Scan & Download
     scan_title: "Scan & Download",
@@ -200,8 +272,9 @@ const I18N = {
       "Subfolders are created level by level under the local directory as <code>journal/volume/article/</code>; PDFs are named with the DOI suffix (e.g. <code>2025JC023188.pdf</code>), and a matching <code>.txt</code> info file (title, date, authors, DOI, etc.) is generated.",
     browser_label:
       "Browser (downloads are performed by browser automation, launched with the selected browser)",
-    opt_edge: "Edge (default, best at passing anti-bot checks)",
+    opt_chrome: "Chrome (default)",
     opt_auto: "Auto (local Chrome / Edge / bundled Chromium first)",
+    opt_edge: "Edge",
     opt_firefox: "Firefox (easily flagged by Cloudflare, not recommended)",
     opt_safari: "Safari (WebKit engine)",
     browser_hint_html:
@@ -211,18 +284,21 @@ const I18N = {
     verify_interval: "Verification click interval (s)",
     verify_max_fails: "Failed verifications before refresh",
     task_interval: "Interval between tasks (s)",
-    gen_info: "Generate info file",
+    auto_access_hint_html:
+      "Every download generates the info file automatically and confirms the paper's access rights, writing a permission record file (<code>&lt;DOI suffix&gt;.access.json</code>) into its target folder. The record carries two permissions: the publisher's official-page access (granted / denied) and whether Sci-Hub has the paper (indexed / not indexed). The record is scanned before every download: a paper is skipped only when both are marked as no (delete the record file to retry); otherwise Sci-Hub is tried first by default, falling back to the publisher's official page.",
     auto_hint:
       "Browser automation opens a real browser window: if there is no download response within the wait time it refreshes automatically (the article is skipped once the refresh limit is exceeded); on human-verification pages it simulates a verification click every “verification click interval” seconds, and after “failed verifications before refresh” consecutive failures it refreshes the page to verify again (all within the per-page wait time); on login pages the window stays open and downloading continues automatically once you finish signing in manually in the browser.",
     import_ph:
-      "Enter a task list file path to import, e.g. /mnt/d/paper/任务清单-Nature.json (relative paths are resolved against the site root)",
+      "Enter task list path(s) to import (separate multiple lists with commas / semicolons / newlines); leave empty and click the button to pick files instead",
     import_list: "Import Task List",
-    import_list_tip: "Load a task list from the given path and set it as the current pending list",
+    import_list_tip:
+      "Imports from the paths in the input (one or more); when the input is empty, clicking opens a file picker to select multiple list files at once",
+    import_reading: "Reading {n} list file(s)…",
     gen_undone: "Generate Undone List",
     gen_undone_tip:
-      "Based on the local directory scan, generate a new task list from the not-yet-downloaded items in the current list and switch to it automatically",
+      "Based on the local directory scan, generate new task lists from the not-yet-downloaded items, one per journal, and switch to them automatically",
     save_list_tip:
-      "Save the current pending task list to a file (task-list-<journal>.json, auto-numbered on name clashes)",
+      "Save the current pending task list per journal (task list files, overwriting on name clashes)",
     list_persist_hint:
       "The list used by the last task is restored automatically when the site opens; after generating a list in “Literature Search” above, importing one here, or generating an undone list, the current pending list switches automatically and is persisted (its file path is shown in the list info).",
     scan_local: "Scan Local Directory",
@@ -242,7 +318,8 @@ const I18N = {
     auth_skip: "Skip This Article",
 
     // Tree
-    root_title_tip: "Click to expand/collapse the volume list",
+    root_title_tip:
+      "Click to expand/collapse the volume list (one page only; the full scan runs automatically when generating the download list)",
     vol_label_tip: "Click to load/collapse this volume's articles",
     count_pcs: "{sel} / {total} items",
     root_volumes_suffix: ", {n} volumes",
@@ -252,8 +329,14 @@ const I18N = {
     scan_done_bar: "{n} volumes in total, {m} articles scanned",
     scan_progress_bar:
       "Scanning volume list: {loaded} / ~{total} articles scanned (click the journal name again to collapse and pause)",
+    vol_partial_bar:
+      "Volume list covers {loaded} / ~{total} articles; clicking “Generate Download List” completes the full journal scan automatically — no need to wait.",
+    scan_more: "Scan all volumes",
     vol_incomplete:
-      "The journal's volume list is still being scanned; this volume's articles may be incomplete (they will be filled in automatically).",
+      "The journal's volume list is still incomplete; this volume's articles may be partial (they will be filled in when the list is generated).",
+    select_all: "Select all",
+    select_all_tip:
+      "Check/uncheck every retrieved journal (whole-journal selection; the full scan runs automatically when the list is generated)",
 
     // Detail pane
     dt_date: "Date",
@@ -282,7 +365,8 @@ const I18N = {
     manifest_prepared: "Preparing list: “{t}” — fully retrieved ({n} articles), aggregating…",
     manifest_generating: "Generating download list…",
     save_failed: "Save failed",
-    manifest_cached: "✔ List cached ({n} articles). Continue in the “Scan & Download” section below.",
+    manifest_cached:
+      "✔ List generated ({n} articles in total, split into {f} file(s) by journal: {names}). Continue in the “Scan & Download” section below.",
     save_fail_prefix: "Save failed: ",
     no_manifest: "No task list yet. Generate or import one first.",
     journal_sep: ", ",
@@ -291,7 +375,7 @@ const I18N = {
     list_count_part: " ｜ {n} articles",
     generated_at: " ｜ Generated at {t}",
     from_undone: " ｜ Source: undone list",
-    file_label: " ｜ File: ",
+    files_label: " ｜ {n} list file(s): {names}",
     list_default_filename: "task-list.json",
     read_manifest_fail: "Failed to read list",
     export_ok: "✔ Task list saved ({n} articles): {p}; a copy has been downloaded via the browser",
@@ -316,10 +400,16 @@ const I18N = {
     st_missing: "✘ Missing",
     with_txt: " (with info file)",
     without_txt: " (info file missing; it will be regenerated on re-download)",
+    access_denied_note: " (permission record: both official pages and Sci-Hub marked no; will be skipped at download time)",
+    pdf_invalid_note: " (corrupted PDF, treated as missing and safe to re-download)",
+    scan_denied_suffix:
+      ", {n} of them are marked no on both official pages and Sci-Hub (skipped at download time)",
     st_downloading: "⏳ Downloading",
-    downloading_n: "Downloading… item {i} / {n} (ok {ok}, failed {fail})",
+    downloading_n: "Downloading… item {i} / {n} (ok {ok}, failed {fail}, no access {na})",
     st_ok: "✔ Done",
     st_fail: "✘ Failed",
+    st_no_access: "⊘ No access",
+    no_access_default: "No access (purchase or institutional login required); article skipped automatically",
     ba_prefix: "[browser automation] ",
     info_file_suffix: " (info file: {p})",
     unknown_error: "Unknown error",
@@ -327,7 +417,7 @@ const I18N = {
     interval_wait: "Waiting between tasks ({s}s)… {done} / {n} done",
     st_paused: "⏸ Stopped",
     stopped_summary: "Stopped: {done} / {n} items done; click “Resume Download” to retry from the current item",
-    done_summary: "Download finished: {ok} succeeded, {fail} failed, {skip} existing skipped",
+    done_summary: "Download finished: {ok} succeeded, {fail} failed, {na} skipped (no access), {skip} existing skipped",
     refreshed: "Refreshed; rescanning…",
     stopping: "Stopping the current download…",
     open_dir_failed: "Failed to open directory",

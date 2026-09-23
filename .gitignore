@@ -5,10 +5,11 @@ papers/
 download-manifest.json
 server/cache/
 server/state.json
+# 期刊库（本地数据：联网搜索添加的期刊及其 ISSN）
+journal-library.json
 
-# 本地任务清单与测试数据
+# 本地任务清单（运行时生成，同名覆盖）
 任务清单-*.json
-test-list.json
 
 # Node
 node_modules/
@@ -24,3 +25,5 @@ venv/
 .DS_Store
 .idea/
 .vscode/
+*.swp
+.fuse_hidden*

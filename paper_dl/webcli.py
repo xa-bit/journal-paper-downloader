@@ -15,7 +15,7 @@ from __future__ import annotations
 import argparse
 import json
 
-from .journal import fetch_journal_works, resolve_journal
+from .journal import fetch_journal_works, journal_from_issn, resolve_journal, search_journals
 from .resolvers import ResolveError, resolve_arxiv, resolve_doi, search_by_title
 
 
@@ -25,11 +25,24 @@ def _emit(payload: dict) -> None:
 
 def cmd_journal(args) -> int:
     try:
-        journal = resolve_journal(args.url)
+        if args.issn:
+            journal = journal_from_issn(args.issn, url=args.url or "")
+        else:
+            journal = resolve_journal(args.url)
     except ResolveError as exc:
         _emit({"ok": False, "error": str(exc)})
         return 1
     _emit({"ok": True, "journal": journal.to_dict()})
+    return 0
+
+
+def cmd_journals_search(args) -> int:
+    try:
+        results = search_journals(args.query, rows=args.rows)
+    except ResolveError as exc:
+        _emit({"ok": False, "error": str(exc)})
+        return 1
+    _emit({"ok": True, "journals": results})
     return 0
 
 
@@ -91,8 +104,16 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
 
     p_journal = sub.add_parser("journal", help="从期刊网址解析期刊信息（ISSN、标题）")
-    p_journal.add_argument("url", help="期刊网址，如 https://www.nature.com/ngeo/")
+    p_journal.add_argument("url", nargs="?", default="", help="期刊网址，如 https://www.nature.com/ngeo/；也接受纯 ISSN")
+    p_journal.add_argument("--issn", help="直接按 ISSN 查询（期刊库导入路径）")
     p_journal.set_defaults(func=cmd_journal)
+
+    p_journals = sub.add_parser(
+        "journals", help="按名称/关键词搜索 Crossref 期刊（供期刊库手动添加挑选候选）"
+    )
+    p_journals.add_argument("--query", required=True, help="期刊名称关键词")
+    p_journals.add_argument("--rows", type=int, default=8, help="返回候选数量（默认 8）")
+    p_journals.set_defaults(func=cmd_journals_search)
 
     p_works = sub.add_parser("works", help="按 ISSN 拉取期刊文献（Crossref，游标分页）")
     p_works.add_argument("--issn", required=True, help="期刊 ISSN，如 1944-8007")

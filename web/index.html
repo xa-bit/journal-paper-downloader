@@ -37,11 +37,13 @@
       </div>
       <div class="url-actions">
         <button type="button" id="add-url-btn" class="secondary" data-i18n="add_url">＋ 增加期刊网址</button>
-        <button type="button" id="split-url-btn" class="secondary" data-i18n="split_urls">⇱ 分离多网址行</button>
+        <button type="button" id="library-btn" class="secondary"
+                title="打开期刊库：全选或依次勾选期刊，把地址批量导入检索栏；也可手动添加、编辑期刊地址"
+                data-i18n="open_library" data-i18n-title="open_library_tip">📚 期刊库</button>
         <button type="button" id="search-all-btn" class="primary" data-i18n="search_journals">检索期刊</button>
       </div>
       <p class="hint" data-i18n="multi_url_hint">
-        支持一次输入多个期刊；单行内粘贴多个网址（空格 / 逗号 / 换行分隔）后点“分离多网址行”可自动拆成多行。
+        支持一次输入多个期刊（网址或 ISSN）；也可打开期刊库，全选或依次勾选后批量导入检索栏。
       </p>
       <p id="journal-msg" class="hint"></p>
 
@@ -55,10 +57,15 @@
       </div>
 
       <div class="manifest-bar">
+        <label class="select-all-label" title="勾选/取消当前检索到的所有期刊（整刊全选，生成清单时自动补全检索）"
+               data-i18n-title="select_all_tip">
+          <input type="checkbox" id="select-all-journals" />
+          <span data-i18n="select_all">全选</span>
+        </label>
         <span id="selected-summary" class="summary">已选 0 篇</span>
         <button id="save-manifest-btn" class="primary" disabled data-i18n="save_manifest">生成下载清单</button>
         <button id="export-list-btn" class="secondary" disabled
-                title="把当前任务清单保存为文件（任务清单-期刊名.json，重名自动加序号），并通过浏览器下载"
+                title="按期刊把当前任务清单保存为文件（任务清单-期刊名.json，每刊一份，同名覆盖），并通过浏览器下载"
                 data-i18n="export_list" data-i18n-title="export_list_tip">
           保存任务清单
         </button>
@@ -82,9 +89,9 @@
       <div class="strategy-setting">
         <span class="field-label" data-i18n="browser_label">浏览器选择（下载由浏览器自动化完成，按所选浏览器启动）</span>
         <select id="browser-select" class="browser-select">
-          <option value="edge" selected data-i18n="opt_edge">Edge（默认，通过反爬验证率最高）</option>
+          <option value="chrome" selected data-i18n="opt_chrome">Chrome（默认）</option>
           <option value="auto" data-i18n="opt_auto">自动（优先本机 Chrome / Edge / 内置 Chromium）</option>
-          <option value="chrome">Chrome</option>
+          <option value="edge" data-i18n="opt_edge">Edge</option>
           <option value="firefox" data-i18n="opt_firefox">Firefox（易被 Cloudflare 识别，不推荐）</option>
           <option value="safari" data-i18n="opt_safari">Safari（WebKit 引擎）</option>
         </select>
@@ -114,11 +121,13 @@
           <span data-i18n="task_interval">任务间隔（秒）</span>
           <input type="text" id="task-interval" value="5" inputmode="numeric" />
         </label>
-        <label class="field checkbox-field">
-          <span data-i18n="gen_info">生成信息文件</span>
-          <input type="checkbox" id="gen-info" checked />
-        </label>
       </div>
+      <p class="hint" data-i18n-html="auto_access_hint_html">
+        每次下载都会自动生成信息文件，并确认该文献的访问权限，在其保存目录写入权限记录文件
+        （<code>DOI尾缀.access.json</code>），记录包含两个权限：官方网页权限（出版商允许 / 拒绝访问）
+        与 Sci-Hub 是否收录。下载前自动扫描该记录：仅当两者都被标记为“无”时才直接跳过该篇
+        （删除记录文件后可重试）；否则默认优先用 Sci-Hub 检索下载，失败再转出版商官方页面。
+      </p>
       <p class="hint" data-i18n="auto_hint">
         浏览器自动化会打开真实浏览器窗口：等待时间内无下载响应会自动刷新（超过刷新次数后跳过该篇）；
         遇到人机验证时每“验证点击间隔”秒自动模拟点击一次验证，连续“验证失败几次后刷新”次未通过会刷新页面重新验证
@@ -130,19 +139,21 @@
           type="text"
           id="import-path"
           class="import-path"
-          placeholder="输入任务清单文件路径后导入，如 /mnt/d/paper/任务清单-Nature.json（相对路径按网站根目录解析）"
+          placeholder="输入任务清单路径后导入（多份用逗号 / 分号 / 换行分隔）；留空并点击按钮可直接选择文件批量导入"
           data-i18n-placeholder="import_ph"
           autocomplete="off"
         />
-        <button id="import-btn" class="secondary" title="按路径载入任务清单，并设为当前待执行清单"
+        <button id="import-btn" class="secondary"
+                title="输入框有路径时按路径导入（可多份）；输入框为空时打开文件选择器，一次选多份清单批量导入"
                 data-i18n="import_list" data-i18n-title="import_list_tip">导入任务清单</button>
+        <input type="file" id="import-file-input" class="hidden" accept=".json,application/json" multiple />
         <button id="undone-btn" class="secondary" disabled
-                title="按本地目录扫盘结果，把当前清单里未下载的条目生成为新的任务清单并自动切换使用"
+                title="按本地目录扫盘结果，把当前清单里未下载的条目按期刊分别生成新的任务清单并自动切换使用"
                 data-i18n="gen_undone" data-i18n-title="gen_undone_tip">
           生成未下载清单
         </button>
         <button id="save-list-btn" class="secondary" disabled
-                title="把当前待执行的任务清单保存为文件（任务清单-期刊名.json，重名自动加序号）"
+                title="把当前待执行的任务清单按期刊分别保存为文件（任务清单-期刊名.json，同名覆盖）"
                 data-i18n="export_list" data-i18n-title="save_list_tip">
           保存任务清单
         </button>
@@ -169,6 +180,41 @@
   <footer class="app-footer">
     <p data-i18n="footer_note">浏览器自动化只在出版商页面模拟正常的人工下载操作，不会绕过付费墙或验证机制。</p>
   </footer>
+
+  <!-- 期刊库弹窗：勾选导入检索栏 / 手动添加（联网搜索确认）/ 编辑地址 / 删除 -->
+  <div id="library-modal" class="modal-overlay hidden">
+    <div class="modal library-modal">
+      <div class="modal-header">
+        <h3 data-i18n="lib_title">📚 期刊库</h3>
+        <button type="button" id="library-close-btn" class="secondary row-remove" title="关闭"
+                data-i18n-title="lib_close">×</button>
+      </div>
+
+      <div class="library-add">
+        <input type="text" id="library-add-input"
+               placeholder="手动添加：输入期刊名称或网址，联网搜索确认对应的期刊及可用地址"
+               data-i18n-placeholder="lib_add_ph" autocomplete="off" />
+        <button type="button" id="library-search-btn" class="secondary" data-i18n="lib_search">联网搜索</button>
+      </div>
+      <div id="library-candidates" class="library-candidates hidden"></div>
+
+      <div class="library-toolbar">
+        <input type="text" id="library-filter" placeholder="按期刊名 / ISSN 筛选"
+               data-i18n-placeholder="lib_filter_ph" autocomplete="off" />
+        <label class="lib-select-all">
+          <input type="checkbox" id="library-check-all" />
+          <span data-i18n="lib_select_all">全选</span>
+        </label>
+        <span id="library-count" class="hint"></span>
+      </div>
+      <div id="library-list" class="library-list"></div>
+
+      <div class="modal-footer">
+        <span class="hint" data-i18n="lib_footer_hint">勾选后导入检索栏；✎ 编辑地址、✕ 删除条目（立即保存）</span>
+        <button type="button" id="library-import-btn" class="primary" data-i18n="lib_import">导入所选至检索栏</button>
+      </div>
+    </div>
+  </div>
 
   <!-- 浏览器自动化人工干预横幅（检测到登录/验证时显示） -->
   <div id="auth-banner" class="auth-banner hidden">
