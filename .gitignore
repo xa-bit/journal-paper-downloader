@@ -8,8 +8,9 @@ server/state.json
 # 期刊库（本地数据：联网搜索添加的期刊及其 ISSN）
 journal-library.json
 
-# 本地任务清单（运行时生成，同名覆盖）
-任务清单-*.json
+# 期刊下载清单（任务清单-期刊名.json）随仓库提交、同步至 GitHub；
+# 运行时生成的“未下载”衍生清单继续忽略
+任务清单-未下载-*.json
 
 # Node
 node_modules/

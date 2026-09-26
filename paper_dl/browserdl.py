@@ -24,11 +24,12 @@
      "access_path": "..."}                  # access_path：已写入的无权限记录文件
 
 单个任务的流程：
-默认先用 Sci-Hub 镜像按 DOI 检索下载（不在界面显示，见 scihub 模块）；失败后转
-出版商官方页面：打开落地页 -> 寻找并点击 PDF 下载入口（失败则尝试出版商直链）
+默认先走 Sci-Hub 镜像按 DOI 检索下载（不在界面显示，见 scihub 模块）；Sci-Hub
+失败后转 ResearchGate 检索公开全文下载（见 researchgate 模块）；再失败转出版商
+官方页面：打开落地页 -> 寻找并点击 PDF 下载入口（失败则尝试出版商直链）
 -> 每轮等待 wait_minutes 分钟：期间监测下载队列 / 登录与验证页 / 跳过与停止指令
 -> 无响应则刷新页面，最多 max_refresh 次，仍无响应则报错交给下一个任务
-（Sci-Hub 阶段同样遵循这两项设置）
+（Sci-Hub / ResearchGate 阶段同样遵循等待与刷新这两项设置）
 -> 检测到浏览器开始下载 PDF 后等待完成 -> 按命名规则移动/重命名到目标目录
 -> 生成信息文件（始终） -> 写入权限记录文件 -> 关闭标签页，等待下一个任务。
 
@@ -37,13 +38,16 @@
 或 302 重定向到 /doi/abs/ 摘要页）——检测到即立即跳过该篇（返回 no_access 标记），
 不做等待/刷新重试。
 
-权限记录文件（双路径权限）：权限确认后在该文献的保存目录写入 <DOI尾缀>.access.json，
-包含两个权限：官方网页权限 official（"granted" 有权限 / "denied" 无权限）与
+权限记录文件（三路径权限）：权限确认后在该文献的保存目录写入 <DOI尾缀>.access.json，
+包含三个权限：官方网页权限 official（"granted" 有权限 / "denied" 无权限）、
 Sci-Hub 是否收录 scihub（"available" / "unavailable"；unavailable 仅在检索结果
 页成功打开并明确报告未收录时标记——镜像打不开 / HTTP 错误 / 网络波动一律按
-下载失败处理，不标记）。各路径只更新自己、保留另一路径的已知状态。Node 服务
-下载前始终扫描该记录：仅当两条路径都标记为“无”（official=denied 且
-scihub=unavailable）时该文献才直接跳过。
+下载失败处理，不标记）与 ResearchGate 是否有公开全文 researchgate
+（"available" / "unavailable"；unavailable 仅在检索/文献页成功打开并明确显示
+无公开全文时标记——网页打不开 / 反爬拦截 / 网络波动一律按下载失败处理，不标记）。
+各路径只更新自己、保留其他路径的已知状态。Node 服务下载前始终扫描该记录：
+仅当三条路径都标记为“无”（official=denied、scihub=unavailable 且
+researchgate=unavailable）时该文献才直接跳过。
 
 验证处理分三类：
 - 人机验证 / 反爬拦截（Cloudflare Turnstile、“确认您是真人”等）：走自动验证循环——
@@ -65,6 +69,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import random
 import re
 import shutil
 import sys
@@ -75,7 +80,13 @@ import traceback
 from pathlib import Path
 from urllib.parse import urlparse
 
-from .downloader import is_pdf_file_ok, write_access_marker, write_info_file
+from .downloader import (
+    is_pdf_file_ok,
+    read_access_marker,
+    write_access_marker,
+    write_info_file,
+)
+from . import researchgate
 from . import scihub
 from .resolvers import Paper, ResolveError, resolve_doi
 
@@ -111,6 +122,9 @@ DOWNLOAD_COMPLETE_TIMEOUT = 900  # 单个文件下载完成的兜底等待（15 
 # Cloudflare 托管型验证的被动等待时长：期间不点击、不刷新——验证无需点击、
 # 实测约 5-20s 自动完成；过早模拟点击反而会打断/升级验证，使其永远无法通过
 CF_PASSIVE_GRACE_SECONDS = 30
+# Sci-Hub 镜像停在首页（302 回首页的未收录表现）的判定宽限：15s 无变化才切换
+# 下一镜像（给迟到重定向留时间；绝不据此写 scihub=unavailable）
+SCIHUB_HOME_REDIRECT_GRACE = 15
 
 PLAYWRIGHT_INSTALL_HINT = (
     "浏览器自动化需要先安装 Playwright 并准备浏览器："
@@ -156,7 +170,7 @@ _AUTH_SNIFF_JS = """() => {
   const visible = (el) => !!(el && (el.offsetWidth || el.offsetHeight || el.getClientRects().length));
   const pwd = [...document.querySelectorAll('input[type=password]')].some(visible);
   const title = document.title || '';
-  const body = ((document.body && document.body.innerText) || '').slice(0, 8000);
+  const body = ((document.body && document.body.innerText) || '').slice(0, 12000);
   const text = title + ' ' + body;
   // 关键：Turnstile/reCAPTCHA 验证成功后，其 iframe 仍会留在页面上显示“成功”，
   // 不能凭 iframe 存在判定“仍在验证”；验证通过后隐藏 token 输入框会被填值，
@@ -172,8 +186,12 @@ _AUTH_SNIFF_JS = """() => {
   // 无访问权限（付费墙）：出版商明确返回购买/租用/机构登录选项——
   // Wiley 系无权下载时 PDF 入口会返回 "Get access to the full version of this article /
   // Purchase Instant Access / $xx" 面板（或直接 302 到 /doi/abs/ 摘要页，见下方 URL 判定），
-  // 这类状态刷新/重试无解，必须立即跳过而不是按“无响应”空等
-  const paywall = /get access to the full version|purchase instant access|buy article|rent this article|rent article|purchase this article|purchase access|get access to this (article|content)|you (do not|don't) have (access|permission) to (this|the) (article|content|resource)|you do not have full access|access to (this|the) (article|content|resource) (has been|is) denied|not entitled to access/i.test(text);
+  // Springer 系付费墙则显示 "Log in via an institution / Buy article PDF 39,95 € /
+  // Institutional subscriptions / Subscribe and save" 购买面板
+  // ——这类状态刷新/重试无解，必须立即跳过而不是按“无响应”空等。
+  // 注意不要收录 “access this article / buy now” 这类泛化短语：
+  // 前者会跨词命中 Springer 开放获取页的版权声明（“Open Access This article is licensed…”）
+  const paywall = /get access to the full version|purchase instant access|buy article pdf|rent this article|rent article|purchase this article|purchase access|get access to this (article|content)|you (do not|don't) have (access|permission) to (this|the) (article|content|resource)|you do not have full access|access to (this|the) (article|content|resource) (has been|is) denied|not entitled to access|log ?in via an institution|institutional subscriptions?|instant access to the full (article|issue)|subscribe and save|price includes vat/i.test(text);
   return { pwd, cf, denied, paywall, verified, title: title.slice(0, 200), url: location.href };
 }"""
 
@@ -519,6 +537,15 @@ class BrowserWorker:
             paper = resolve_doi(doi)
         except ResolveError as exc:
             return {"ok": False, "error": f"解析 DOI 失败: {exc}"}
+        # 权限记录（三路径）：配合界面“无权限时跳过”选项做分源门控——
+        # 勾选的下载源若已记录无权限则直接跳过该源；未勾选则依旧尝试
+        access_rec = await asyncio.to_thread(read_access_marker, target_dir, stem)
+        skip_scihub = bool(req.get("skip_scihub")) and access_rec.get("scihub") == "unavailable"
+        skip_rg = (
+            bool(req.get("skip_researchgate"))
+            and access_rec.get("researchgate") == "unavailable"
+        )
+        skip_official = bool(req.get("skip_official")) and access_rec.get("official") == "denied"
 
         try:
             self._browser_redirect = None
@@ -544,30 +571,72 @@ class BrowserWorker:
 
         try:
             # 默认下载策略（不在界面显示，默认优先）：先走 Sci-Hub 按 DOI 检索下载，
-            # 失败（镜像无法打开/未命中/PDF 直链失败）再转出版商官方页面。
+            # 失败（镜像无法打开/未命中/PDF 直链失败）再转 ResearchGate 检索公开全文；
+            # 仍失败最后转出版商官方页面。
             # 权限记录按路径写入：Sci-Hub 命中记 scihub=available、全部镜像报告
-            # 未命中记 scihub=unavailable、出版商下载成功记 official=granted、
-            # 出版商确认无权限记 official=denied（见 _finalize / NoAccessError 处理）
+            # 未命中记 scihub=unavailable；ResearchGate 有公开全文记
+            # researchgate=available、明确无公开全文记 researchgate=unavailable；
+            # 出版商下载成功记 official=granted、出版商确认无权限记 official=denied
+            #（见 _finalize / NoAccessError 处理）
             download = None
             source = "publisher"
             if paper.doi and scihub.scihub_enabled():
-                outcome, download = await self._scihub_fetch(
-                    page, paper, req, window, max_refresh
-                )
-                if outcome == "download":
-                    source = "sci-hub"
-                elif outcome == "not_indexed":
-                    # 全部镜像明确报告未收录该 DOI：记 Sci-Hub 路径（保留官方
-                    # 路径的已知状态），随后仍回退官方页面尝试
-                    try:
-                        write_access_marker(
-                            paper, target_dir, stem,
-                            scihub="unavailable",
-                            reason_scihub="Sci-Hub 全部镜像报告未收录该 DOI",
-                        )
-                    except Exception:
-                        pass  # 记录写失败不影响下载流程
+                if skip_scihub:
+                    self._status(
+                        req, "scihub",
+                        "权限记录为 Sci-Hub 未收录且已勾选“无权限时跳过”，跳过 Sci-Hub",
+                    )
+                else:
+                    outcome, download = await self._scihub_fetch(
+                        page, paper, req, window, max_refresh
+                    )
+                    if outcome == "download":
+                        source = "sci-hub"
+                    elif outcome == "not_indexed":
+                        # 全部镜像明确报告未收录该 DOI：记 Sci-Hub 路径（保留其他
+                        # 路径的已知状态），随后仍回退 ResearchGate / 官方页面尝试
+                        try:
+                            write_access_marker(
+                                paper, target_dir, stem,
+                                scihub="unavailable",
+                                reason_scihub="Sci-Hub 全部镜像报告未收录该 DOI",
+                            )
+                        except Exception:
+                            pass  # 记录写失败不影响下载流程
+            if download is None and paper.doi and researchgate.researchgate_enabled():
+                if skip_rg:
+                    self._status(
+                        req, "researchgate",
+                        "权限记录为 ResearchGate 无公开全文且已勾选“无权限时跳过”，跳过 ResearchGate",
+                    )
+                else:
+                    outcome, download, rg_reason = await self._researchgate_fetch(
+                        page, paper, req, window, max_refresh
+                    )
+                    if outcome == "download":
+                        source = "researchgate"
+                    elif outcome == "no_public_fulltext":
+                        # ResearchGate 检索/文献页成功打开并明确显示无公开全文：
+                        # 确定性结论，记 researchgate=unavailable（保留其他路径的
+                        # 已知状态），随后仍回退官方页面尝试
+                        try:
+                            write_access_marker(
+                                paper, target_dir, stem,
+                                researchgate="unavailable",
+                                reason_researchgate=rg_reason,
+                            )
+                        except Exception:
+                            pass  # 记录写失败不影响下载流程
             if download is None:
+                if skip_official:
+                    raise ResolveError(
+                        "官方页面权限记录为无权限且已勾选“无权限时跳过”，本篇跳过"
+                    )
+                if not researchgate.official_enabled():
+                    raise ResolveError(
+                        "Sci-Hub 与 ResearchGate 均未命中，且官方页面路径已通过 "
+                        "OFFICIAL_ENABLED=0 关闭（调试模式），本篇按失败处理"
+                    )
                 download = await self._run_task(page, paper, req, window, max_refresh)
             self._status(req, "saving", "下载完成，正在按命名规则保存文件…")
             tmp_path = await download.path()
@@ -590,8 +659,8 @@ class BrowserWorker:
                 "source": source,
             }
         except NoAccessError as exc:
-            # 官方路径无权限已确认：写入 official=denied（合并语义保留 Sci-Hub
-            # 路径的已知状态）；若 Sci-Hub 路径也标记为无，下次扫盘将直接跳过
+            # 官方路径无权限已确认：写入 official=denied（合并语义保留 Sci-Hub /
+            # ResearchGate 路径的已知状态）；三条路径都标记为无时，下次扫盘直接跳过
             access_path = None
             try:
                 access_path = write_access_marker(
@@ -673,7 +742,7 @@ class BrowserWorker:
                 f"正在通过 Sci-Hub 检索 DOI（镜像 {idx + 1}/{len(mirrors)}: {mirror}）…",
             )
             try:
-                resp = await asyncio.wait_for(
+                await asyncio.wait_for(
                     page.goto(
                         scihub.scihub_page_url(mirror, doi),
                         wait_until="commit",
@@ -681,23 +750,6 @@ class BrowserWorker:
                     ),
                     timeout=scihub.MIRROR_OPEN_BUDGET + 5,
                 )
-                # 镜像未收录时通常返回 403 并 302 回首页（实测行为），但网络
-                # 波动/限流同样会触发该表现——无法区分，故一律按“网页没打开的
-                # 下载失败”处理：切换下一镜像，绝不据此判定“未收录”
-                final_url = page.url or ""
-                try:
-                    status = resp.status if resp is not None else 0
-                except Exception:
-                    status = 0
-                if status >= 400 or (
-                    final_url.rstrip("/").split("?")[0] == mirror.rstrip("/")
-                ):
-                    self._status(
-                        req, "scihub",
-                        f"镜像 {mirror} 未返回该 DOI 的检索页（HTTP {status}，"
-                        f"落地 {final_url[:60]}），按下载失败处理，尝试下一镜像",
-                    )
-                    continue
             except Exception as exc:
                 self._status(
                     req, "scihub",
@@ -706,11 +758,22 @@ class BrowserWorker:
                 )
                 continue
 
+            # 页面就绪等待（修复“网页还没加载完就跳下一下载源”）：
+            # wait_until="commit" 只等响应开始，此时页面往往还在加载；镜像带
+            # Cloudflare 防护时首个响应就是 403 挑战页（“Just a moment…”）。
+            # 此前在 goto 一返回就按 HTTP 403/落地首页立即判失败，挑战页还没来得及
+            # 自动验证就整组镜像放弃、直接跳下一下载源。现在在“每页等待时间”内
+            # 等页面就绪：挑战页走自动验证（通过后浏览器自动重载出检索结果），
+            # 停在镜像首页且 15s 无变化才判定该镜像无检索页、切换下一镜像。
+            settled = await self._scihub_settle_page(page, req, window, mirror)
+            if settled is None:
+                continue  # 验证超时/一直未就绪/停在首页：切换下一镜像（提示已打印）
+
             # 等待窗口内取检索结果并触发下载；无响应则刷新页面重试
             # （延续“每页等待时间” / “无响应最大刷新次数”设置）
             refreshes_left = max_refresh
+            info = settled
             while True:
-                info = await self._scihub_wait_result(page, req, window)
                 if info is not None:
                     if info.get("pdfUrl"):
                         got = await self._scihub_download_pdf(
@@ -725,9 +788,10 @@ class BrowserWorker:
                         self._status(
                             req, "scihub",
                             f"镜像 {mirror} 检索页确认未收录该 DOI，"
-                            "转文献官方页面下载…",
+                            "转下一下载源（ResearchGate / 官方页面）…",
                         )
                         return "not_indexed", None
+                    info = None
                 # 刷新前先检查下载队列：等待/验证期间可能已有下载开始（验证通过
                 # 后自动重载、页面自动触发等），直接取用，避免刷新冲掉进行中下载
                 got = self._pop_download()
@@ -747,6 +811,8 @@ class BrowserWorker:
                         )
                     except Exception:
                         pass
+                    # 刷新后重新评估检索结果（镜像 cf / pdfUrl / notFound）
+                    info = await self._scihub_wait_result(page, req, window)
                     continue
                 self._status(
                     req, "scihub",
@@ -757,9 +823,80 @@ class BrowserWorker:
         self._status(
             req, "scihub",
             "Sci-Hub 全部镜像下载失败（未获得检索页的明确结论），"
-            "转文献官方页面下载…",
+            "转下一下载源（ResearchGate / 官方页面）…",
         )
         return "failed", None
+
+    async def _scihub_settle_page(self, page, req: dict, window: int, mirror: str):
+        """等待镜像页面就绪并给出可判定的状态（最多 window 秒 = “每页等待时间”）。
+
+        goto(wait_until="commit") 返回时页面通常仍在加载；镜像带 Cloudflare 防护时
+        首个响应就是 403 挑战页。本方法在等待窗口内：
+        - 出现人机验证 → 预算内走自动验证循环，通过后浏览器自动重载出检索结果；
+        - 检索结果可判定（pdfUrl / notFound 标记）→ 原样返回给调用方；
+        - 页面停在镜像首页（302 回首页的未收录表现）且 15s 无变化 → 返回 None
+          （仅切换下一镜像，绝不写 scihub=unavailable——网络波动也会这样表现）；
+        - 预算耗尽仍无结论 → 返回 None（切换下一镜像）。
+        """
+        deadline = time.monotonic() + window
+        home_since = None
+        while True:
+            if self.skip_event.is_set():
+                raise SkipRequested("已人工跳过该篇")
+            if self.stop_event.is_set():
+                raise StopRequested("下载已被停止")
+            if not self._downloads.empty():
+                return None  # 下载已在进行：由外层取走
+            try:
+                info = await asyncio.wait_for(
+                    page.evaluate(scihub.PAGE_STATE_JS), timeout=10
+                )
+            except Exception:
+                info = None  # 页面跳转/加载中：下轮再检测
+            if info:
+                if info.get("cf"):
+                    remaining = int(max(5, deadline - time.monotonic()))
+                    self._status(req, "auth", "Sci-Hub 镜像出现人机验证，自动验证中…")
+                    try:
+                        outcome = await self._challenge_wait(
+                            page, req, "Cloudflare 人机验证", remaining
+                        )
+                    except NoAccessError:
+                        return None
+                    if outcome == "cleared":
+                        home_since = None  # 验证通过：重新等结果页
+                        continue
+                    self._status(
+                        req, "scihub",
+                        f"镜像 {mirror} 人机验证未通过（{window // 60} 分钟内），切换下一镜像",
+                    )
+                    return None
+                if info.get("pdfUrl") or info.get("notFound"):
+                    return info  # 可判定：交给调用方下载 / 记未收录
+                # 既非挑战也无可判定标记：若停在镜像首页（302 回首页的未收录表现），
+                # 宽限 15s 无变化才判定，给迟到重定向留时间
+                final_url = (page.url or "").rstrip("/").split("?")[0]
+                if final_url == mirror.rstrip("/"):
+                    if home_since is None:
+                        home_since = time.monotonic()
+                        self._status(req, "scihub", f"镜像 {mirror} 停在首页，等待重定向结果…")
+                    elif time.monotonic() - home_since >= SCIHUB_HOME_REDIRECT_GRACE:
+                        self._status(
+                            req, "scihub",
+                            f"镜像 {mirror} 停在首页无检索页"
+                            f"（{SCIHUB_HOME_REDIRECT_GRACE}s 无变化），切换下一镜像",
+                        )
+                        return None
+                else:
+                    home_since = None  # 已离开首页（重载/跳转中）：重新等待
+            if time.monotonic() >= deadline:
+                self._status(
+                    req, "scihub",
+                    f"镜像 {mirror} 在 {window // 60} 分钟内未出现可判定的检索结果，"
+                    "切换下一镜像",
+                )
+                return None
+            await asyncio.sleep(2)
 
 
     async def _scihub_wait_result(self, page, req: dict, window: int):
@@ -861,6 +998,367 @@ class BrowserWorker:
                     html = ""
                 if html and "<html" in html.lower():
                     self._status(req, "scihub", "PDF 直链返回了 HTML 页面（非 PDF），放弃该镜像")
+                    return None
+            await asyncio.sleep(1)
+        return None
+
+    # ------------------------------------------------------------------
+    # ResearchGate 下载源（Sci-Hub 之后、官方页面之前）：检索公开全文并下载
+    # ------------------------------------------------------------------
+
+    async def _researchgate_fetch(
+        self, page, paper: Paper, req: dict, window: int, max_refresh: int
+    ):
+        """按 DOI 在 ResearchGate 检索公开全文并下载。
+
+        返回三元组 (outcome, download, reason)，由调用方处理：
+          ("download", Download, "")            —— 公开全文下载成功；
+          ("no_public_fulltext", None, reason)  —— 检索/文献页成功打开并明确显示
+                                                   无公开全文（确定性结论，调用方记
+                                                   researchgate=unavailable）；
+          ("failed", None, "")                  —— 其余失败（页面打不开/反爬拦截/
+                                                   登录墙/刷新后仍无响应/PDF 直链
+                                                   失败），非确定性结论，不标记。
+        判定原则：researchgate 无公开全文只以“检索/文献页成功打开并渲染”为准；
+        网页没打开、反爬拦截、跳登录墙等情况一律按下载失败（failed）处理，
+        绝不据此判定无公开全文（避免误标 researchgate=unavailable）。
+        等待与刷新沿用页面设置：单轮等待窗口 window（“每页等待时间”）内无响应
+        则刷新页面重试，最多 max_refresh 次（“无响应最大刷新次数”）。
+        注意：本阶段不写 official 权限——官方网页权限只以出版商官方页面为准。
+        """
+        doi = str(paper.doi or "").strip()
+        if not doi:
+            return "failed", None, ""
+        self._status(req, "researchgate", "正在通过 ResearchGate 检索该 DOI…")
+        try:
+            await asyncio.wait_for(
+                page.goto(
+                    researchgate.search_url(doi),
+                    wait_until="domcontentloaded",
+                    timeout=researchgate.RG_OPEN_BUDGET * 1000,
+                ),
+                timeout=researchgate.RG_OPEN_BUDGET + 5,
+            )
+        except Exception as exc:
+            self._status(
+                req, "researchgate",
+                f"ResearchGate 检索页无法打开（{researchgate.RG_OPEN_BUDGET}s 预算内: "
+                f"{type(exc).__name__} {str(exc)[:120]}），按下载失败处理，转官方页面…",
+            )
+            return "failed", None, ""
+        # 注意：此处不再按 HTTP 403 立即判失败——ResearchGate 的反爬拦截首响应
+        # 就是 403 挑战页（页面尚未加载完），是否可判定交由 _researchgate_wait_state
+        # 处理（人机验证走自动点击循环；拦截页/登录墙才会判 failed）。
+
+        stage = "search"
+        refreshes_left = max_refresh
+        while True:
+            got = self._pop_download()  # 上一阶段遗留的下载直接取用
+            if got is not None:
+                return "download", got, ""
+            # search.Search.html?q=<DOI> 常被 ResearchGate 直接 302 到文献页：
+            # 检测到已在文献页时跳过检索结果环节，直接进入文献页判定
+            if stage == "search" and researchgate.is_publication_url(page.url or ""):
+                self._status(req, "researchgate", "ResearchGate 已直接定位到文献页")
+                stage = "publication"
+                refreshes_left = max_refresh
+                continue
+            info = await self._researchgate_wait_state(page, req, window, stage)
+            if info is not None and info.get("failed"):
+                self._status(
+                    req, "researchgate",
+                    f"ResearchGate 页面不可判定（{info['failed']}），"
+                    "按下载失败处理，转官方页面…",
+                )
+                return "failed", None, ""
+            if info is None:
+                # 等待窗口内无确定性结论：刷新重试（沿用“无响应最大刷新次数”）
+                got = self._pop_download()
+                if got is not None:
+                    return "download", got, ""
+                if refreshes_left > 0:
+                    refreshes_left -= 1
+                    self._status(
+                        req, "researchgate",
+                        f"页面在 {window // 60} 分钟内无响应，刷新页面"
+                        f"（剩余刷新次数 {refreshes_left}）",
+                    )
+                    try:
+                        await asyncio.wait_for(
+                            page.reload(wait_until="domcontentloaded"), timeout=90
+                        )
+                    except Exception:
+                        pass
+                    continue
+                self._status(
+                    req, "researchgate",
+                    f"刷新 {max_refresh} 次（每轮 {window // 60} 分钟）后仍无响应，"
+                    "ResearchGate 阶段结束，转官方页面…",
+                )
+                return "failed", None, ""
+
+            if stage == "search":
+                if info.get("pubLinks"):
+                    # 先确认仍在检索结果页：若 RG 已把 DOI 直接解析跳转到文献页，
+                    # 文献页上的“相关文献”链接也会形成 pubLinks——绝不能点它们，
+                    # 直接进入文献页判定阶段
+                    if researchgate.is_publication_url(page.url or ""):
+                        self._status(req, "researchgate", "ResearchGate 已直接定位到文献页")
+                        stage = "publication"
+                        refreshes_left = max_refresh
+                        continue
+                    target = info["pubLinks"][0]
+                    # 拟人节奏打开文献页：随机短暂停顿后“点击”结果链接（RG 对
+                    # 连续 page.goto 直跳的自动化特征拦截很敏感）；点击失败再
+                    # 回退为 goto 直跳
+                    await asyncio.sleep(random.uniform(1.5, 3.0))
+                    m = re.search(r"/publication/(\d+)", target)
+                    opened = False
+                    if m:
+                        try:
+                            loc = page.locator(
+                                f'a[href*="/publication/{m.group(1)}"]'
+                            ).first
+                            await loc.click(timeout=8000)
+                            opened = True
+                            try:
+                                await page.wait_for_load_state(
+                                    "domcontentloaded", timeout=30000
+                                )
+                            except Exception:
+                                pass
+                        except Exception:
+                            opened = False  # 点击失败（链接迟渲染等）：goto 回退
+                    if not opened:
+                        try:
+                            await asyncio.wait_for(
+                                page.goto(
+                                    target,
+                                    wait_until="domcontentloaded",
+                                    timeout=researchgate.RG_OPEN_BUDGET * 1000,
+                                ),
+                                timeout=researchgate.RG_OPEN_BUDGET + 5,
+                            )
+                        except Exception:
+                            self._status(
+                                req, "researchgate",
+                                "文献页无法打开（超时/网络错误），按下载失败处理，转官方页面…",
+                            )
+                            return "failed", None, ""
+                    # 不按 HTTP 403 立即判失败（可能只是还没加载完的反爬挑战页），
+                    # 是否可判定交由 _researchgate_wait_state 处理
+                    stage = "publication"
+                    refreshes_left = max_refresh  # 文献页阶段的刷新次数单独计算
+                    continue
+                if info.get("noResults"):
+                    reason = "ResearchGate 检索页无该 DOI 的文献结果"
+                    self._status(req, "researchgate", f"{reason}（确定性结论），转官方页面…")
+                    return "no_public_fulltext", None, reason
+                # 既无结果也无渲染完成信号：按无响应刷新（落到下方统一处理）
+            else:
+                if info.get("downloadUrl"):
+                    got = await self._researchgate_download_pdf(
+                        page, info["downloadUrl"], req, window
+                    )
+                    if got is not None:
+                        self._status(req, "researchgate", "ResearchGate 下载成功")
+                        return "download", got, ""
+                    # 全文直链无响应/失败：落到下方“无响应刷新”逻辑重新触发
+                elif info.get("requestOnly"):
+                    # 文献页仅可请求全文：模拟点击 “Request full-text”（向作者请求
+                    # 全文）。请求是否被响应不由本流程保证——此处只负责发出请求；
+                    # 不标记 researchgate 无权限，随后继续官方页面下载
+                    clicked = await self._researchgate_click_request(page, req)
+                    if clicked:
+                        self._status(
+                            req, "researchgate",
+                            "已模拟点击 Request full-text 发出全文请求"
+                            "（不标记无权限），转官方页面…",
+                        )
+                    else:
+                        self._status(
+                            req, "researchgate",
+                            "未找到可点击的 Request full-text 入口，转官方页面…",
+                        )
+                    return "requested", None, ""
+                elif info.get("noFulltext"):
+                    # “无全文”确定性结论只在仍处于文献页时成立：被重定向走
+                    #（如登录墙/首页）属于不可判定，按下载失败处理
+                    if not researchgate.is_publication_url(page.url or ""):
+                        self._status(
+                            req, "researchgate",
+                            "页面被重定向离开文献页（登录墙/拦截），无法判定公开全文，"
+                            "按下载失败处理，转官方页面…",
+                        )
+                        return "failed", None, ""
+                    reason = "ResearchGate 文献页已完整加载但无公开全文下载入口"
+                    self._status(req, "researchgate", f"{reason}（确定性结论），转官方页面…")
+                    return "no_public_fulltext", None, reason
+                # 页面状态未定（渲染中）：按无响应刷新
+
+    async def _researchgate_click_request(self, page, req: dict) -> bool:
+        """模拟点击文献页上的 “Request full-text”（向作者请求全文）。
+
+        点击后若弹出确认对话框（Send / Send request 等）则补一次确认点击。
+        请求何时被作者响应无法由本流程控制——本方法只负责发出请求动作，
+        返回是否成功点击了请求入口。
+        """
+        for sel in (
+            'button:has-text("Request full-text")',
+            'a:has-text("Request full-text")',
+            'button:has-text("Request the full-text")',
+            '[role="button"]:has-text("Request full-text")',
+            'button:has-text("Request full text")',
+        ):
+            try:
+                loc = page.locator(sel).first
+                if await loc.count() and await loc.is_visible():
+                    await asyncio.sleep(random.uniform(1.0, 2.0))  # 拟人节奏
+                    await loc.click(timeout=8000)
+                    self._status(req, "researchgate", "已点击 Request full-text 请求全文")
+                    # RG 可能弹出确认对话框：补一次确认点击（找不到就跳过）
+                    await asyncio.sleep(1.5)
+                    for confirm in (
+                        'button:has-text("Send request")',
+                        'button:has-text("Send")',
+                        'button:has-text("Confirm")',
+                    ):
+                        try:
+                            c = page.locator(confirm).first
+                            if await c.count() and await c.is_visible():
+                                await c.click(timeout=5000)
+                                self._status(req, "researchgate", "已确认发送全文请求")
+                                break
+                        except Exception:
+                            continue
+                    return True
+            except Exception:
+                continue
+        return False
+
+    async def _researchgate_wait_state(self, page, req: dict, window: int, stage: str):
+        """等待 ResearchGate 页面呈现确定性结论（最多 window 秒 = “每页等待时间”）。
+
+        返回 dict：
+          search 阶段：{pubLinks: [...]}（命中文献结果）/ {noResults: true}
+                       （页面渲染完成但没有任何文献结果）；
+          publication 阶段：{downloadUrl: "..."}（公开全文下载入口）/
+                       {requestOnly: true}（仅可请求全文）/
+                       {noFulltext: true}（渲染完成且无任何下载/请求入口）；
+          {failed: "..."}（反爬拦截页 / 跳登录墙，无法判定，不写权限记录）。
+        返回 None：预算耗尽仍无结论（外层按“无响应”刷新页面重试）。
+        渲染宽限：判定“无结果/无全文”前，页面须已渲染并保持 RG_RESULT_GRACE 秒
+        无变化（防止 React 迟渲染把“可下载”误判成“无全文”）。
+        期间出现人机验证则在剩余预算内走自动点击循环（通过后重新检测）。
+        """
+        deadline = time.monotonic() + window
+        rendered_since = None
+        while True:
+            if self.skip_event.is_set():
+                raise SkipRequested("已人工跳过该篇")
+            if self.stop_event.is_set():
+                raise StopRequested("下载已被停止")
+            if not self._downloads.empty():
+                return None  # 下载已在进行：由外层取走
+            try:
+                info = await asyncio.wait_for(
+                    page.evaluate(researchgate.PAGE_STATE_JS), timeout=10
+                )
+            except Exception:
+                info = None
+            if info:
+                if info.get("cf"):
+                    remaining = int(max(5, deadline - time.monotonic()))
+                    self._status(req, "auth", "ResearchGate 出现人机验证，自动验证中…")
+                    try:
+                        outcome = await self._challenge_wait(
+                            page, req, "Cloudflare 人机验证", remaining
+                        )
+                    except NoAccessError:
+                        # 无权限面板出现在 ResearchGate 页上不可信：按无响应处理，
+                        # 绝不映射为“无公开全文”
+                        return None
+                    if outcome == "cleared":
+                        rendered_since = None  # 验证通过：重新积累渲染宽限
+                        continue
+                    return None  # 验证超时：放弃（外层按无响应刷新）
+                if info.get("blocked"):
+                    return {"failed": "ResearchGate 反爬拦截页（403/限流）"}
+                if info.get("loginWall"):
+                    return {"failed": "ResearchGate 跳转登录墙（未登录不可判定）"}
+                if stage == "search":
+                    if info.get("pubLinks"):
+                        return {"pubLinks": info["pubLinks"]}
+                    if info.get("rendered"):
+                        if rendered_since is None:
+                            rendered_since = time.monotonic()
+                        elif time.monotonic() - rendered_since >= researchgate.RG_RESULT_GRACE:
+                            return {"noResults": True}
+                else:
+                    if info.get("downloadUrl"):
+                        return {"downloadUrl": info["downloadUrl"]}
+                    if info.get("requestOnly"):
+                        return {"requestOnly": True}
+                    if info.get("rendered"):
+                        if rendered_since is None:
+                            rendered_since = time.monotonic()
+                        elif time.monotonic() - rendered_since >= researchgate.RG_RESULT_GRACE:
+                            return {"noFulltext": True}
+            if time.monotonic() >= deadline:
+                return None
+            await asyncio.sleep(2)
+
+    async def _researchgate_download_pdf(self, page, pdf_url: str, req: dict, window: int):
+        """用浏览器会话下载 ResearchGate 公开全文直链；成功返回 Download，失败 None。
+
+        等待下载开始的最长时间为 window（“每页等待时间”）；失败返回 None，
+        由外层按“无响应”刷新页面重新触发。带来源页 Referer 导航；若文件源
+        返回 inline PDF（无附件头），按 PDF 浏览页直接取回字节（等效人工点“保存”）。
+        """
+        referrer = page.url or ""
+        self._status(req, "researchgate", "ResearchGate 命中公开全文，正在下载 PDF…")
+        resp = None
+        try:
+            resp = await asyncio.wait_for(
+                page.goto(pdf_url, referer=referrer, wait_until="commit", timeout=60000),
+                timeout=65,
+            )
+        except Exception:
+            resp = None  # 下载接管导航（ERR_ABORTED）属预期
+        if resp is not None:
+            try:
+                if resp.status >= 400:
+                    self._status(req, "researchgate", f"全文直链返回 HTTP {resp.status}，放弃")
+                    return None
+            except Exception:
+                pass
+        start = time.monotonic()
+        html_checked = False
+        deadline = start + window
+        while time.monotonic() < deadline:
+            if not self._downloads.empty():
+                return self._pop_download()
+            if self.skip_event.is_set():
+                raise SkipRequested("已人工跳过该篇")
+            if self.stop_event.is_set():
+                raise StopRequested("下载已被停止")
+            # inline PDF 浏览页兜底（文件源未返回附件头时）
+            await self._maybe_grab_inline_pdf(self._pick_active_page(page), req)
+            # 20s 后仍无下载：检查是否落到了 HTML 页面（403/404/登录错误页）
+            if not html_checked and time.monotonic() - start > 20:
+                html_checked = True
+                try:
+                    html = await asyncio.wait_for(
+                        page.evaluate(
+                            "() => ((document.documentElement && "
+                            "document.documentElement.outerHTML) || '').slice(0, 300)"
+                        ),
+                        timeout=5,
+                    )
+                except Exception:
+                    html = ""
+                if html and "<html" in html.lower():
+                    self._status(req, "researchgate", "全文直链返回了 HTML 页面（非 PDF），放弃")
                     return None
             await asyncio.sleep(1)
         return None
@@ -1558,8 +2056,8 @@ class BrowserWorker:
     ) -> tuple[Path, Path | None, Path]:
         """把浏览器下载的原始文件按命名规则移动/重命名到目标目录，并生成信息文件与权限记录。
 
-        source 为下载来源（"sci-hub" / "publisher"）：下载成功即该路径权限确认，
-        按来源写入对应权限字段（合并语义保留另一路径的已知状态）。
+        source 为下载来源（"sci-hub" / "researchgate" / "publisher"）：下载成功即
+        该路径权限确认，按来源写入对应权限字段（合并语义保留其他路径的已知状态）。
         """
         target_dir.mkdir(parents=True, exist_ok=True)
         final_pdf = target_dir / f"{stem}.pdf"
@@ -1575,10 +2073,13 @@ class BrowserWorker:
         info_path = None
         if generate_info:
             info_path = write_info_file(paper, target_dir / f"{stem}.txt", extra=meta or {})
-        # 下载成功即该路径权限确认：写入权限记录（双路径权限），供下载前扫描
-        # （始终开启）判断——仅当 official=denied 且 scihub=unavailable 才跳过
+        # 下载成功即该路径权限确认：写入权限记录（三路径权限），供下载前扫描
+        # （始终开启）判断——仅当 official=denied、scihub=unavailable 且
+        # researchgate=unavailable 三者皆无时才跳过
         if source == "sci-hub":
             access_path = write_access_marker(paper, target_dir, stem, scihub="available")
+        elif source == "researchgate":
+            access_path = write_access_marker(paper, target_dir, stem, researchgate="available")
         else:
             access_path = write_access_marker(paper, target_dir, stem, official="granted")
         return final_pdf, info_path, access_path

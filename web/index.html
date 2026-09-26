@@ -122,11 +122,27 @@
           <input type="text" id="task-interval" value="5" inputmode="numeric" />
         </label>
       </div>
+      <div class="settings-grid">
+        <span class="field-label" data-i18n="skip_sources_label">无权限时跳过对应下载源（勾选后，该下载源在权限记录为“无”时直接跳过；不勾选则依旧尝试）</span>
+        <label class="field checkbox-field">
+          <span data-i18n="skip_scihub">Sci-Hub 无权限时跳过</span>
+          <input type="checkbox" id="skip-scihub" checked />
+        </label>
+        <label class="field checkbox-field">
+          <span data-i18n="skip_researchgate">ResearchGate 无全文时跳过</span>
+          <input type="checkbox" id="skip-researchgate" checked />
+        </label>
+        <label class="field checkbox-field">
+          <span data-i18n="skip_official">官网无权限时跳过</span>
+          <input type="checkbox" id="skip-official" checked />
+        </label>
+      </div>
       <p class="hint" data-i18n-html="auto_access_hint_html">
         每次下载都会自动生成信息文件，并确认该文献的访问权限，在其保存目录写入权限记录文件
-        （<code>DOI尾缀.access.json</code>），记录包含两个权限：官方网页权限（出版商允许 / 拒绝访问）
-        与 Sci-Hub 是否收录。下载前自动扫描该记录：仅当两者都被标记为“无”时才直接跳过该篇
-        （删除记录文件后可重试）；否则默认优先用 Sci-Hub 检索下载，失败再转出版商官方页面。
+        （<code>DOI尾缀.access.json</code>），记录包含三个下载源：官方网页权限（出版商允许 / 拒绝访问）、
+        Sci-Hub 是否收录与 ResearchGate 是否有公开全文。下载前自动扫描该记录，按上方三个选项决定是否跳过对应下载源；
+        默认按 Sci-Hub → ResearchGate → 官方页面的顺序尝试下载。ResearchGate 文献页仅有
+        “Request full-text”时，会自动模拟点击向作者请求全文（不标记无权限），随后继续官方页面下载。
       </p>
       <p class="hint" data-i18n="auto_hint">
         浏览器自动化会打开真实浏览器窗口：等待时间内无下载响应会自动刷新（超过刷新次数后跳过该篇）；

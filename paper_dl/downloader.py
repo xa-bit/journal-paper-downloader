@@ -94,11 +94,27 @@ def access_marker_path(target_dir: str | Path, stem: str) -> Path:
     return Path(target_dir) / f"{stem}{ACCESS_MARKER_SUFFIX}"
 
 
-#: 权限记录（双路径）取值
+def read_access_marker(target_dir: str | Path, stem: str) -> dict:
+    """读取权限记录文件（三路径权限）；不存在或不可解析时返回空 dict。
+
+    供下载流程按“各下载源是否已记录无权限”决定是否跳过该下载源
+    （受界面“无权限时跳过”三个选项控制）。
+    """
+    target = access_marker_path(target_dir, stem)
+    try:
+        data = json.loads(target.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+#: 权限记录（三路径）取值
 OFFICIAL_GRANTED = "granted"        # 官方网页（出版商）：有访问权限
 OFFICIAL_DENIED = "denied"          # 官方网页（出版商）：无访问权限（付费墙/机构登录）
 SCIHUB_AVAILABLE = "available"      # Sci-Hub：收录该文献
 SCIHUB_UNAVAILABLE = "unavailable"  # Sci-Hub：未收录该文献
+RG_AVAILABLE = "available"          # ResearchGate：有公开全文可下载
+RG_UNAVAILABLE = "unavailable"      # ResearchGate：无公开全文（仅可请求/无下载入口/未收录）
 
 
 def write_access_marker(
@@ -108,25 +124,30 @@ def write_access_marker(
     *,
     official: str | None = None,
     scihub: str | None = None,
+    researchgate: str | None = None,
     reason_official: str = "",
     reason_scihub: str = "",
+    reason_researchgate: str = "",
 ) -> Path:
-    """写入/合并权限记录文件（<DOI尾缀>.access.json，双路径权限）。
+    """写入/合并权限记录文件（<DOI尾缀>.access.json，三路径权限）。
 
-    两个权限：
-      official —— 官方网页（出版商）访问权限："granted" / "denied"；
-      scihub   —— Sci-Hub 是否有该文献："available" / "unavailable"。
-    合并语义：只更新本次传入的路径（None 表示保留旧值），另一路径的已知状态
+    三个权限：
+      official     —— 官方网页（出版商）访问权限："granted" / "denied"；
+      scihub       —— Sci-Hub 是否有该文献："available" / "unavailable"；
+      researchgate —— ResearchGate 是否有公开全文："available" / "unavailable"。
+    合并语义：只更新本次传入的路径（None 表示保留旧值），其他路径的已知状态
     不受影响；兼容旧格式记录（access: granted/denied → 迁移到 official 路径）。
-    下载前扫描（始终开启）：仅当两条路径都标记为“无”（official=denied 且
-    scihub=unavailable）时该文献才直接跳过。
+    下载前扫描（始终开启）：仅当三条路径都标记为“无”（official=denied、
+    scihub=unavailable 且 researchgate=unavailable）时该文献才直接跳过。
     """
     if official is not None and official not in (OFFICIAL_GRANTED, OFFICIAL_DENIED):
         raise ValueError(f"official 取值非法: {official}")
     if scihub is not None and scihub not in (SCIHUB_AVAILABLE, SCIHUB_UNAVAILABLE):
         raise ValueError(f"scihub 取值非法: {scihub}")
-    if official is None and scihub is None:
-        raise ValueError("official / scihub 至少需要指定一个")
+    if researchgate is not None and researchgate not in (RG_AVAILABLE, RG_UNAVAILABLE):
+        raise ValueError(f"researchgate 取值非法: {researchgate}")
+    if official is None and scihub is None and researchgate is None:
+        raise ValueError("official / scihub / researchgate 至少需要指定一个")
     target = access_marker_path(target_dir, stem)
     target.parent.mkdir(parents=True, exist_ok=True)
     existing: dict = {}
@@ -147,8 +168,11 @@ def write_access_marker(
         "title": paper.display_title or "",
         "official": official or existing.get("official"),
         "scihub": scihub or existing.get("scihub"),
+        "researchgate": researchgate or existing.get("researchgate"),
         "reason_official": reason_official or existing.get("reason_official", ""),
         "reason_scihub": reason_scihub or existing.get("reason_scihub", ""),
+        "reason_researchgate": reason_researchgate
+        or existing.get("reason_researchgate", ""),
         "checked_at": datetime.now().astimezone().isoformat(timespec="seconds"),
     }
     target.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")

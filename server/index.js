@@ -68,17 +68,19 @@ function entryPaths(root, item) {
     dir,
     pdf: path.join(dir, stem + ".pdf"),
     txt: path.join(dir, stem + ".txt"),
-    // 权限记录文件（browserdl 写入，双路径权限）：
-    // official="granted"/"denied"（官方网页权限），scihub="available"/"unavailable"（Sci-Hub 是否收录）
+    // 权限记录文件（browserdl 写入，三路径权限）：
+    // official="granted"/"denied"（官方网页权限），scihub="available"/"unavailable"
+    //（Sci-Hub 是否收录），researchgate="available"/"unavailable"（ResearchGate 公开全文）
     access: path.join(dir, stem + ".access.json"),
   };
 }
 
-/** 读取权限记录文件（双路径权限）：返回 {official, scihub}，未知路径为 null。
- *  official: "granted"/"denied"；scihub: "available"/"unavailable"。
+/** 读取权限记录文件（三路径权限）：返回 {official, scihub, researchgate}，未知路径为 null。
+ *  official: "granted"/"denied"；scihub: "available"/"unavailable"；
+ *  researchgate: "available"/"unavailable"。
  *  兼容旧格式记录（access: granted/denied → official 路径）。 */
 function readAccessRecord(p) {
-  const rec = { official: null, scihub: null };
+  const rec = { official: null, scihub: null, researchgate: null };
   let data;
   try {
     data = JSON.parse(fs.readFileSync(p.access, "utf8"));
@@ -95,12 +97,22 @@ function readAccessRecord(p) {
   if (data.scihub === "available" || data.scihub === "unavailable") {
     rec.scihub = data.scihub;
   }
+  if (data.researchgate === "available" || data.researchgate === "unavailable") {
+    rec.researchgate = data.researchgate;
+  }
   return rec;
 }
 
-/** 仅当官方网页与 Sci-Hub 两条路径都标记为“无”时才直接跳过该文献。 */
-function accessBothDenied(rec) {
-  return !!rec && rec.official === "denied" && rec.scihub === "unavailable";
+/** 仅当三个下载源都标记为“无”（官方网页无权限、Sci-Hub 未收录且
+ *  ResearchGate 无公开全文）时才直接跳过该文献。
+ *  旧记录缺少 researchgate 字段时视为未知（null）——不跳过，下次下载会补查。 */
+function accessAllDenied(rec) {
+  return (
+    !!rec &&
+    rec.official === "denied" &&
+    rec.scihub === "unavailable" &&
+    rec.researchgate === "unavailable"
+  );
 }
 
 /** 简单校验 PDF 是否正常：文件存在且非空、头部含 %PDF-、尾部含 %%EOF。
@@ -127,6 +139,66 @@ function isPdfFileOk(p) {
     return false;
   } finally {
     if (fd !== undefined) fs.closeSync(fd);
+  }
+}
+
+/** 深度 PDF 质量检查：对通过上面粗检的文件，再验证交叉引用结构、检测空字节
+ *  填充与 HTML 伪装内容——识别“能过粗检但实际无法打开”的损坏 PDF
+ *  （如下载中断导致 xref 表损坏、磁盘写入异常产生 0 字节填充等）。
+ *  返回 null（质量正常）或问题代码（too_small / no_startxref / bad_xref /
+ *  zero_filled / html / read_failed，供界面显示与 i18n 映射）。 */
+function pdfQualityIssue(p) {
+  let fd;
+  try {
+    fd = fs.openSync(p, "r");
+    const size = fs.fstatSync(fd).size;
+    if (size < 120) return "too_small"; // 只有头尾标记、没有实际内容
+
+    const tailLen = Math.min(8192, size);
+    const tail = Buffer.alloc(tailLen);
+    fs.readSync(fd, tail, 0, tailLen, size - tailLen);
+    const tailStr = tail.toString("latin1");
+    // 结构为 ...startxref\n<偏移>\n%%EOF：在最后一个 %%EOF 之前找 startxref，
+    // 避免文件尾部填充数据里出现同名字样造成误判
+    const eofPos = tailStr.lastIndexOf("%%EOF");
+    const region = eofPos >= 0 ? tailStr.slice(0, eofPos) : tailStr;
+    const sx = region.lastIndexOf("startxref");
+    if (sx < 0) return "no_startxref";
+    const offMatch = region.slice(sx + 9).match(/\d+/);
+    if (!offMatch) return "no_startxref";
+    const off = parseInt(offMatch[0], 10);
+    if (!(off > 0 && off < size - 4)) return "bad_xref";
+
+    // startxref 应指向 “xref” 交叉引用表，或 PDF 1.5+ 的 xref 流对象（“N M obj”）
+    const probe = Buffer.alloc(32);
+    fs.readSync(fd, probe, 0, 32, off);
+    if (!/^\s*(xref\b|\d+\s+\d+\s+obj)/.test(probe.toString("latin1"))) return "bad_xref";
+
+    // HTML 伪装检测：网页错误页存成 .pdf 时 <html / <!doctype html 几乎总在文件开头，
+    // 中段抽样兜底覆盖整体为 HTML 的文件（结构完好的真 PDF 不含这些标记，零误判）
+    const headLen = Math.min(1024, size);
+    const head = Buffer.alloc(headLen);
+    fs.readSync(fd, head, 0, headLen, 0);
+    const midLen = Math.min(16384, size);
+    const mid = Buffer.alloc(midLen);
+    fs.readSync(fd, mid, 0, midLen, Math.floor((size - midLen) / 2));
+    let nul = 0;
+    for (const b of mid) if (b === 0) nul += 1;
+    if (nul / midLen > 0.95) return "zero_filled";
+    const sampleLower = (head.toString("latin1") + mid.toString("latin1")).toLowerCase();
+    if (sampleLower.includes("<!doctype html") || sampleLower.includes("<html")) return "html";
+
+    return null;
+  } catch {
+    return "read_failed";
+  } finally {
+    if (fd !== undefined) {
+      try {
+        fs.closeSync(fd);
+      } catch {
+        /* 忽略 */
+      }
+    }
   }
 }
 
@@ -431,15 +503,28 @@ async function ensureFullScan(issn, maxPages = 300) {
 // 请求辅助
 // ---------------------------------------------------------------------------
 
-function readBody(req) {
+// 请求体上限：批量导入任务清单时前端可能整包上传清单内容（单本大刊可超 20MB），
+// 512MB 足够 22 本以上大清单一次性导入；按文件名导入的常规路径不经过大请求体
+const BODY_LIMIT = 512 * 1024 * 1024;
+
+function readBody(req, res, limit = BODY_LIMIT) {
   return new Promise((resolve, reject) => {
     const chunks = [];
     let size = 0;
     req.on("data", (c) => {
       size += c.length;
-      if (size > 32 * 1024 * 1024) {
-        reject(new Error("请求体过大"));
+      if (size > limit) {
+        // 超限：先回应 413 JSON（让前端能读到明确错误），再断开接收
+        const err = new Error(`请求体过大（上限 ${Math.round(limit / 1024 / 1024)}MB）`);
+        err.code = "BODY_TOO_LARGE";
+        try {
+          res.writeHead(413, { "Content-Type": "application/json; charset=utf-8" });
+          res.end(JSON.stringify({ ok: false, error: err.message }));
+        } catch {
+          /* 忽略 */
+        }
         req.destroy();
+        reject(err);
         return;
       }
       chunks.push(c);
@@ -701,6 +786,11 @@ function sanitizeSettings(s) {
     if (v !== undefined) out[k] = v;
   }
   if (KNOWN_BROWSERS.includes(s.browser)) out.browser = s.browser;
+  // “无权限时跳过对应下载源”三个选项（勾选的下载源在权限记录为无时直接跳过；
+  // 未勾选则即便记录为无也依旧尝试）
+  for (const k of ["skipSciHub", "skipResearchGate", "skipOfficial"]) {
+    if (typeof s[k] === "boolean") out[k] = s[k];
+  }
   return out;
 }
 
@@ -927,16 +1017,24 @@ async function handleApi(req, res, pathname, body) {
     }
   }
 
-  // 导入任务清单（支持批量）：paths 为本地路径数组（或单值 path）；
-  // files 为浏览器直接选择上传的清单内容 [{name, content}]，先落盘再激活。
+  // 导入任务清单（支持批量）：
+  // paths 为本地路径数组（或单值 path）；
+  // names 为站点根目录下的清单文件名数组——清单通常就存放在网站根目录，
+  //   前端批量选择文件后只传文件名（请求体仅几 KB），服务端直接读根目录文件，
+  //   避免把几十 MB 的清单内容整包上传（超大请求体会被浏览器/服务端断连）；
+  // files 为根目录中不存在、确需上传内容的清单 [{name, content}]，先落盘再激活；
+  // activate=false 时只导入/返回清单不切换当前待执行清单（供前端分步批量导入）。
   if (pathname === "/api/list/import") {
     const rawPaths = Array.isArray(body.paths)
       ? body.paths
       : body.path
         ? [body.path]
         : [];
+    const rawNames = Array.isArray(body.names) ? body.names : [];
     const uploaded = Array.isArray(body.files) ? body.files : [];
-    if (!rawPaths.length && !uploaded.length) {
+    const activate = body.activate !== false;
+    const missingNames = [];
+    if (!rawPaths.length && !rawNames.length && !uploaded.length) {
       return sendJson(res, 400, { error: "任务清单路径不能为空" });
     }
 
@@ -951,9 +1049,28 @@ async function handleApi(req, res, pathname, body) {
       try {
         const data = JSON.parse(fs.readFileSync(p, "utf8"));
         if (!Array.isArray(data.items)) throw new Error("缺少 items 数组");
-        loaded.push({ path: p, count: data.items.length, journals: data.journals || [] });
+        loaded.push({ path: path.resolve(p), count: data.items.length, journals: data.journals || [] });
       } catch (e) {
         errors.push(`读取失败 ${path.basename(p)}: ${e.message}`);
+      }
+    }
+    // names：仅接受纯文件名（拒绝路径分隔符/..），解析到站点根目录
+    for (const raw of rawNames.map((x) => String(x || "").trim()).filter(Boolean)) {
+      if (/[\\/]/.test(raw) || raw === ".." || raw.startsWith("..")) {
+        errors.push(`文件名不合法: ${raw}`);
+        continue;
+      }
+      const resolved = path.resolve(ROOT, raw);
+      if (!resolved.startsWith(ROOT) || !fs.existsSync(resolved)) {
+        missingNames.push(raw); // 根目录没有：交由前端回退为上传内容
+        continue;
+      }
+      try {
+        const data = JSON.parse(fs.readFileSync(resolved, "utf8"));
+        if (!Array.isArray(data.items)) throw new Error("缺少 items 数组");
+        loaded.push({ path: resolved, count: data.items.length, journals: data.journals || [] });
+      } catch (e) {
+        errors.push(`读取失败 ${raw}: ${e.message}`);
       }
     }
     for (const f of uploaded) {
@@ -973,15 +1090,19 @@ async function handleApi(req, res, pathname, body) {
       }
     }
 
-    if (!loaded.length) {
+    if (!loaded.length && !missingNames.length) {
       return sendJson(res, 400, { error: errors.join("；") || "没有成功导入的清单" });
     }
-    setActiveLists(loaded.map((l) => l.path));
+    if (activate && loaded.length) {
+      setActiveLists(loaded.map((l) => l.path));
+    }
     return sendJson(res, 200, {
       ok: true,
       lists: loaded,
       count: loaded.reduce((sum, l) => sum + l.count, 0),
+      missing: missingNames.length ? missingNames : undefined,
       errors: errors.length ? errors : undefined,
+      activated: activate && loaded.length > 0,
     });
   }
 
@@ -989,13 +1110,31 @@ async function handleApi(req, res, pathname, body) {
     const root = String(body.root || "").trim();
     if (!root) return sendJson(res, 400, { error: "本地目录不能为空" });
     const manifest = readManifest();
+    let qualityDeleted = 0;
     const entries = (manifest.items || []).map((item, i) => {
       const p = entryPaths(root, item);
       // 判定规则：pdf 不存在或文件异常（0 字节 / 残缺 / HTML 错误页）均视为未下载
       // （pdfExists = 存在且正常，pdfInvalid = 文件在但异常）；信息文件状态一并报告；
-      // 权限记录（双路径）一并报告，accessSkip = 两条路径均标记为“无”（下载时直接跳过）
+      // 权限记录（三路径）一并报告，accessSkip = 三个下载源均标记为“无”（下载时直接跳过）
       const pdfFileExists = fs.existsSync(p.pdf);
       const pdfOk = pdfFileExists && isPdfFileOk(p.pdf);
+      // 深度质量检查：粗检通过但结构损坏、实际无法打开的 PDF —— 扫描时直接删除，
+      // 下载队列轮到时按缺失重新下载；删除失败（文件被占用等）时下载请求带
+      // overwrite 覆盖旧文件（qualityIssue 供界面显示损坏原因）
+      let qualityIssue = null;
+      let qualityDeletedThis = false;
+      if (pdfOk) {
+        qualityIssue = pdfQualityIssue(p.pdf);
+        if (qualityIssue) {
+          try {
+            fs.unlinkSync(p.pdf);
+            qualityDeletedThis = true;
+            qualityDeleted += 1;
+          } catch {
+            /* 删除失败：保留文件，重新下载时带 overwrite 覆盖 */
+          }
+        }
+      }
       const accessRec = readAccessRecord(p);
       return {
         index: i,
@@ -1006,15 +1145,17 @@ async function handleApi(req, res, pathname, body) {
         pdfPath: p.pdf,
         txtPath: p.txt,
         accessPath: p.access,
-        pdfExists: pdfOk,
+        pdfExists: pdfOk && !qualityIssue,
         pdfInvalid: pdfFileExists && !pdfOk,
+        qualityIssue: qualityIssue || undefined,
+        qualityDeleted: qualityDeletedThis,
         txtExists: fs.existsSync(p.txt),
         access: accessRec,
-        accessSkip: accessBothDenied(accessRec),
+        accessSkip: accessAllDenied(accessRec),
       };
     });
     const missing = entries.filter((e) => !e.pdfExists).length;
-    // 缺失条目中两条权限路径均标记为“无”的数量：下载前扫描（始终开启）会直接跳过
+    // 缺失条目中三个下载源都标记为“无”的数量：下载前扫描（始终开启）会直接跳过
     const noAccessMarked = entries.filter(
       (e) => !e.pdfExists && e.accessSkip
     ).length;
@@ -1025,6 +1166,7 @@ async function handleApi(req, res, pathname, body) {
       missing,
       exists: entries.length - missing,
       noAccessMarked,
+      qualityDeleted,
       entries,
     });
   }
@@ -1047,14 +1189,21 @@ async function handleApi(req, res, pathname, body) {
     const verifyMaxFails = clampNum(body.verifyMaxFails, 1, 50, 5);
     const rawBrowser = String(body.browser || "auto").trim().toLowerCase();
     const browser = BROWSER_CHOICES.includes(rawBrowser) ? rawBrowser : "auto";
-    // 下载前扫描权限记录（始终自动进行）：权限记录含两个权限——
-    // 官方网页权限（official）与 Sci-Hub 是否收录（scihub）；
-    // 仅当两者都被标记为“无”时直接跳过该篇，不再打开任何页面（删除记录文件后可重试）
-    if (accessBothDenied(readAccessRecord(p))) {
+    // 下载前扫描权限记录（始终自动进行）：权限记录含三个下载源——
+    // 官方网页权限（official）、Sci-Hub 是否收录（scihub）、
+    // ResearchGate 是否有公开全文（researchgate）。
+    // 是否因“记录为无”跳过各下载源由界面三个选项控制（skipSciHub /
+    // skipResearchGate / skipOfficial）：勾选的源在记录为无时直接跳过；
+    // 未勾选的源即便记录为无也依旧尝试。三个源都被跳过时才整体跳过该篇。
+    const rec = readAccessRecord(p);
+    const skipSciHub = body.skipSciHub === true && rec.scihub === "unavailable";
+    const skipResearchGate = body.skipResearchGate === true && rec.researchgate === "unavailable";
+    const skipOfficial = body.skipOfficial === true && rec.official === "denied";
+    if (skipSciHub && skipResearchGate && skipOfficial) {
       return sendJson(res, 200, {
         ok: false,
         error:
-          "保存目录权限记录已标记官方网页与 Sci-Hub 均无权限，已直接跳过该篇" +
+          "三个下载源均已记录无权限且都勾选了“无权限时跳过”，已直接跳过该篇" +
           `（如需重试请删除记录文件: ${p.access}）`,
         no_access: true,
         skipped: true,
@@ -1097,7 +1246,12 @@ async function handleApi(req, res, pathname, body) {
         human_wait_min: 0,
         browser,
         generate_info: true,
-        overwrite: false,
+        // 分源“无权限时跳过”选项：worker 内按权限记录逐源门控
+        skip_scihub: body.skipSciHub === true,
+        skip_researchgate: body.skipResearchGate === true,
+        skip_official: body.skipOfficial === true,
+        // 质量损坏文件扫描时删除失败（文件被占用等）时，前端带 overwrite 重新下载覆盖
+        overwrite: body.overwrite === true,
       });
       if (r.ok) {
         result = r;
@@ -1213,7 +1367,7 @@ async function main() {
         return await handleApi(req, res, url.pathname, {});
       }
       if (req.method === "POST" && url.pathname.startsWith("/api/")) {
-        const body = await readBody(req);
+        const body = await readBody(req, res);
         await handleApi(req, res, url.pathname, body);
       } else if (req.method === "GET") {
         serveStatic(req, res, url.pathname);
@@ -1221,6 +1375,15 @@ async function main() {
         sendJson(res, 405, { error: "Method Not Allowed" });
       }
     } catch (e) {
+      // 响应已发出（如请求体超限的 413）：不再重复响应，仅收尾
+      if (res.headersSent || res.writableEnded) {
+        try {
+          res.end();
+        } catch {
+          /* 忽略 */
+        }
+        return;
+      }
       sendJson(res, 500, { error: e.message || "服务器内部错误" });
     }
   });

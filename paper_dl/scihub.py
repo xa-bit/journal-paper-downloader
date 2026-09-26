@@ -13,11 +13,18 @@
 - 命中：检索结果页内嵌 PDF 直链（形如 https://<filehost>/pdf/<doi>.pdf，
   带 download=true 参数时返回附件下载），页面含 id="article" 的 <embed>
   与“↓下载”按钮（onclick 内嵌 location.href 直链）；
-- 未命中：小页面，含 “no matching proxies found” / “Scientific mutual aid
-  community” 标记，无 PDF 链接。
+- 未命中：小页面，无 PDF 链接。两代未收录页文案：
+  旧版含 “no matching proxies found” / “Scientific mutual aid community”；
+  新版为英文提示页，含 “Please try to search again using DOI” /
+  “cannot find thesis” / “we will include relevant articles as soon as
+  possible” / “try searching the corresponding DOI again after a while”。
 只有“未命中”（检索结果页成功打开并渲染出上述标记）才能判定该镜像未收录；
 网页没打开（超时、HTTP 错误、403 回首页等，可能是网络波动）一律按下载失败
 处理并切换下一镜像，绝不据此判定未收录。
+
+镜像带 Cloudflare 防护时，首个响应是 403 挑战页（“Just a moment…”）——这不是
+失败：browserdl 会在“每页等待时间”内走自动验证循环，通过后浏览器自动重载出
+检索结果；只有验证未通过或页面停在首页 15s 无变化才切换下一镜像。
 """
 
 from __future__ import annotations
@@ -87,7 +94,11 @@ PAGE_STATE_JS = """() => {
   const text = ((document.body && document.body.innerText) || '').slice(0, 5000);
   const cf = /just a moment|attention required|verify you are human|checking your browser|请稍候|正在进行安全验证|确认您不是自动程序/i.test(text)
     || !!document.querySelector('#challenge-form, .cf-browser-verification, iframe[src*="challenges.cloudflare.com"]');
-  // 未命中标记：该镜像族固定文案（命中页不含这些字样）
-  const notFound = !pdfUrl && /no matching proxies found|mutual aid community|cannot be found|no article (found|available)|cannot find (the )?article/i.test(text);
+  // 未命中标记：该镜像族固定文案（命中页不含这些字样）。
+  // 覆盖两代未收录页：旧版 “no matching proxies found / Scientific mutual aid
+  // community”；新版英文提示页（“Please try to search again using DOI… /
+  // cannot find thesis… / we will include relevant articles as soon as possible /
+  // try searching the corresponding DOI again after a while”）。
+  const notFound = !pdfUrl && /no matching proxies found|mutual aid community|cannot be found|no article (found|available)|cannot find (the )?article|cannot find thesis|try (to )?search(ing)? (again )?using (the )?doi|include relevant articles|search(ing)? the corresponding doi again/i.test(text);
   return { pdfUrl, notFound, cf, title: document.title || '', url: location.href };
 }"""

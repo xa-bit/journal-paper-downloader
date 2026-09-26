@@ -15,10 +15,11 @@ Usage: **interactive Web UI** (`npm start`).
 | Source | Purpose |
 |---|---|
 | [Crossref](https://www.crossref.org/) | Look up paper metadata (title, authors, year, landing page) by DOI / title |
-| Sci-Hub mirrors | **Default (hidden) download source**: the DOI is looked up on the Sci-Hub mirror list (`sci-hub.al` → `www.tesble.com` → `www.wellesu.com`); if a mirror cannot be opened it is switched to after 30 s |
-| Publisher pages | Fallback when Sci-Hub fails (not indexed / mirror down / PDF link failed): open the article page via browser automation and trigger the PDF download |
+| Sci-Hub mirrors | **Default (hidden) download source**: the DOI is looked up on the Sci-Hub mirror list (`sci-hub.al` → `www.tesble.com` → `www.wellesu.com`); when a mirror first serves a Cloudflare challenge page (403 "Just a moment…"), the worker auto-verifies within the per-page wait and lets the page finish loading instead of giving up early; a mirror is switched only when it cannot be opened (30 s timeout) or stays on its home page with no search result for 15 s |
+| ResearchGate | Second source when Sci-Hub fails: the DOI is searched on ResearchGate; if the publication page has a public full text ("Download full-text PDF"), it is downloaded directly; the search/publish wait and refresh budgets reuse the per-page settings. Deterministic no-public-fulltext conclusions (search shows no results / "Request full-text" only / no download entry) are recorded as `researchgate: unavailable`; blocked pages / login walls count as plain failures and never set it |
+| Publisher pages | Final fallback when both Sci-Hub and ResearchGate fail: open the article page via browser automation and trigger the PDF download |
 
-> Note: the Sci-Hub step is a built-in default strategy and is not exposed in the UI. To disable it and go straight to publisher pages, start the browser worker with `SCIHUB_ENABLED=0`.
+> Note: the Sci-Hub / ResearchGate steps are built-in default strategies and are not exposed in the UI. Environment switches for debugging: `SCIHUB_ENABLED=0` skips Sci-Hub, `RESEARCHGATE_ENABLED=0` skips ResearchGate, `OFFICIAL_ENABLED=0` skips the publisher page. For single-DOI ResearchGate-channel debugging use `python -m paper_dl.rgdebug <DOI> [save-dir]` (it forces Sci-Hub and the official page off).
 
 ### Installation
 
@@ -58,12 +59,15 @@ The UI has two modules.
 
 **2. Scan & download**
 
-- Set a local directory (e.g. `/mnt/d/paper`) and click "扫描本地目录" to check which PDFs from the manifest already exist (**PDFs only — info files are not considered**); a simple validity check is also performed (non-empty, `%PDF-` header, `%%EOF` tail), and a corrupted PDF (0 bytes, HTML error page, truncated download) is treated as missing so it gets re-downloaded;
-- Click "下载缺失文件" to download the missing papers one by one; files are stored as `local dir/journal name/volume/paper name/`; during a run you can click "停止下载" to interrupt the current item, then "继续下载" to retry from the interrupted item and continue the queue;
+- Set a local directory (e.g. `/mnt/d/paper`) and click "扫描本地目录" to check which PDFs from the manifest already exist (**PDFs only — info files are not considered**); a simple validity check is also performed (non-empty, `%PDF-` header, `%%EOF` tail), and a corrupted PDF (0 bytes, HTML error page, truncated download) is treated as missing so it gets re-downloaded; on top of that, a **deep quality check** runs on files that pass the basic check — cross-reference structure validation (`startxref` → `xref` table / xref-stream object), zero-filled-body detection and HTML-content detection — to catch files that look complete but cannot actually be opened; such files are **deleted at scan time** (the summary reports “已删除损坏 PDF N 份”) and re-downloaded when the download queue reaches them; if deletion fails (file locked), the re-download overwrites the old file;
+- Click "下载缺失文件" to download the missing papers one by one; files are stored as `local dir/journal name/volume/paper name/`; during a run you can click "停止下载" to interrupt the current item, then "继续下载" to retry from the interrupted item and continue the queue; the download list **shows pending papers only** — already-existing and successfully-downloaded entries are no longer displayed (the summary still reports full counts), keeping the list focused on missing / failed / no-access papers for debugging;
 - PDFs are named after the DOI suffix (e.g. DOI `10.1029/2025JC023188` → `2025JC023188.pdf`); a same-name `.txt` info file (title, date, authors, DOI, etc.; can be disabled via checkbox) is (re)generated after each download;
-- **Permission records (dual-path)**: every download confirms the paper's access rights and writes a permission record file (`<DOI suffix>.access.json`) into the paper's target folder. The record carries two permissions — `official`: the publisher's official-page access (`granted` / `denied`), and `scihub`: whether Sci-Hub has the paper (`available` / `unavailable` — `unavailable` is set **only when a mirror's DOI search page actually loads and explicitly reports the DOI as not found**; unopened pages, HTTP errors and network failures count as download failures and never set it). Each path updates itself only and keeps the other path's known state (legacy single-`access` records are read as the `official` path). Before every download the record is scanned automatically: the paper is skipped **only when both paths are marked as no** (`official: denied` and `scihub: unavailable`) — delete the record file to retry. The scan report also shows how many missing papers are marked no on both paths;
+- **Permission records (triple-path)**: every download confirms the paper's access rights and writes a permission record file (`<DOI suffix>.access.json`) into the paper's target folder. The record carries three download sources — `official`: the publisher's official-page access (`granted` / `denied`); `scihub`: whether Sci-Hub has the paper (`available` / `unavailable` — `unavailable` is set **only when a mirror's DOI search page actually loads and explicitly reports the DOI as not found**; unopened pages, HTTP errors and network failures count as download failures and never set it); `researchgate`: whether ResearchGate has a public full text (`available` / `unavailable` — `unavailable` is set **only when the search/publication page actually loads and clearly shows no public full text** (no results / "Request full-text" only / no download entry); blocked pages, login walls and network failures count as download failures and never set it). Each path updates itself only and keeps the other paths' known state (legacy single-`access` records are read as the `official` path; records without `researchgate` are treated as unknown and are never skipped until ResearchGate has been checked). Before every download the record is scanned automatically: the paper is skipped **only when all three paths are marked as no** (`official: denied`, `scihub: unavailable` and `researchgate: unavailable`) — delete the record file to retry. The scan report also shows how many missing papers are marked no on all three paths;
 - **Info files**: the matching info file (`.txt`) is generated automatically for every successful download (no UI toggle);
 - **Download method**: browser automation with a built-in default strategy (not shown in the UI): first try a DOI lookup on the Sci-Hub mirrors (`sci-hub.al` → `www.tesble.com` → `www.wellesu.com`, 30 s per mirror before switching to the next); when Sci-Hub fails (not indexed / mirror not openable / PDF link failed), automatically fall back to the publisher's official page, where the browser passes any human verification and triggers the PDF download; set `SCIHUB_ENABLED=0` to skip Sci-Hub entirely;
+- **Skip no-access sources (three options)**: Sci-Hub / ResearchGate / publisher page can each be checked — a checked source is skipped when its permission record says no; unchecked sources are retried even when recorded as no. When all three are skipped the paper is skipped outright without opening any page.
+- **ResearchGate "Request full-text" handling**: when a publication page has no public full text and only offers "Request full-text", the worker simulates clicking it (including the confirmation dialog) to request the paper from the author — `researchgate` is **not** marked unavailable, and the flow continues to the publisher page;
+- **Early paywall detection on publisher pages**: Springer / Wiley purchase panels ("Log in via an institution / Buy article PDF / Institutional subscriptions / Get access to the full version…") are detected within 5 s of page load and skipped immediately instead of waiting out the whole no-response window;
 - **Browser choice**: you can specify which browser to use (Chrome by default / Auto / Edge / Firefox / Safari; stored in the browser and still effective on the next visit); "Auto" tries local Chrome, then Edge, then the bundled Chromium in order; picking a specific browser launches it directly when downloading (switching browsers rebuilds the browser instance automatically);
 - **Settings auto-memory**: the local directory, wait/refresh/verification/task-interval values, the browser choice and all other settings are saved automatically; reopening the site restores the settings from the last task run (stored server-side in `server/state.json`, so it also works when opening from a different browser);
 - **Refresh**: during a run you can click "⟳ 刷新" — it keeps your current inputs (the saved directory and other settings stay unchanged), resets the download state and re-scans, after which you can click "下载缺失文件" again to download in sequence.
@@ -72,7 +76,7 @@ The UI has two modules.
 
 The current pending manifest is shown in the "扫盘与下载" module (entry count and file list). When the site opens it **reuses the manifest(s) from the last task**; after generating manifests in "文献检索", importing some, or generating not-downloaded manifests, the current manifest set switches automatically and is persisted (`server/state.json`). **Multiple manifests can be active at once** — they are merged (deduplicated by DOI) for scanning and downloading.
 
-- **Import task manifests** (导入任务清单, batch, single entry): enter one or more manifest JSON file paths (absolute, or relative to the site root; separate multiple paths with commas / semicolons / newlines) in the input and click "导入任务清单" (or press Enter); when the input is empty, clicking the button opens a file picker so you can select several manifest files at once — all of them are imported together, merged as the current pending manifest, and re-scanned automatically;
+- **Import task manifests** (导入任务清单, batch, single entry): enter one or more manifest JSON file paths (absolute, or relative to the site root; separate multiple paths with commas / semicolons / newlines) in the input and click "导入任务清单" (or press Enter); when the input is empty, clicking the button opens a file picker so you can select several manifest files at once (e.g. all 20+ journal lists of the library — tested with 22 lists / ~210k entries in one go) — all of them are imported together, merged as the current pending manifest, and re-scanned automatically. Manifests stored in the site root are imported **by filename only** (a few KB per request, so even huge libraries never hit request-body limits); files outside the root fall back to content upload, one file per request, and the request-body cap is 512 MB;
 - **Generate not-downloaded manifest** (生成未下载清单): after a scan, save the **not-yet-downloaded entries** of the current manifest as new manifests, **one per journal** (`任务清单-未下载-期刊名.json`, same-name overwrite — no more `-1`/`-2` suffixes), and switch them to the current pending manifest automatically; legacy numbered files (`…-1.json`, `…-2.json`) are cleaned up automatically whenever a manifest is written;
 - **Save task manifest** (保存任务清单): save the current pending manifest per journal as `任务清单-期刊名.json` (same-name overwrite).
 
@@ -88,7 +92,7 @@ The current pending manifest is shown in the "扫盘与下载" module (entry cou
 - Verification status uses "two consecutive clean checks" to confirm success, avoiding a misjudgement in the instant of a page transition that would interrupt the verification midway;
 - **No false refresh after a successful verification**: after Turnstile / reCAPTCHA passes, its component iframe remains on the page; the code reads the verification token (hidden input value) to detect "already passed" and won't treat a passed check as still-verifying and refresh the page into a re-verification; after passing, it also won't re-navigate and interrupt a download that has already started;
 - **Popup child windows (verification / download entry) are followed automatically**: when a publisher puts the flow in a child window, the code brings the new window to the front (so it is not hidden behind the main window) and switches to the newest child window for detection and clicking; please complete the verification inside the child window and avoid clicking outside it (on some sites the child window auto-closes on blur).
-- **Download detection & landing**: once a PDF enters the browser's download queue, the code waits for the download to complete, then moves/renames it into the target directory per the naming rule (the original download file is removed immediately), generates the info file automatically, and records the confirmed access on the matching path of the permission record file (`scihub: available` for a Sci-Hub download, `official: granted` for a publisher download);
+- **Download detection & landing**: once a PDF enters the browser's download queue, the code waits for the download to complete, then moves/renames it into the target directory per the naming rule (the original download file is removed immediately), generates the info file automatically, and records the confirmed access on the matching path of the permission record file (`scihub: available` for a Sci-Hub download, `researchgate: available` for a ResearchGate download, `official: granted` for a publisher download);
 - **Task interval**: a default 5 s pause (adjustable) between adjacent downloads avoids a request rate that websites might treat as malicious;
 - **Browser choice**: Auto / Chrome / Edge / Firefox / Safari are selectable in the UI. Chrome / Edge / Auto use Playwright's Chromium channel; Firefox / Safari (WebKit engine) use their respective engines — if not installed, run `python -m playwright install firefox` or `python -m playwright install webkit` first;
 - Cookies and login state are kept per browser family in local browser profile directories (the Chromium family shares one directory; Firefox / WebKit each have their own), so after one institutional login, subsequent downloads pass automatically.
@@ -102,7 +106,7 @@ pip install playwright && python -m playwright install chromium
 # python -m playwright install webkit
 ```
 
-> Note: by default each download first tries the (hidden) Sci-Hub mirror list, and only falls back to the publisher's official page when Sci-Hub cannot deliver the PDF — the publisher flow simulates a normal manual download and never bypasses paywalls or verification mechanisms. Set `SCIHUB_ENABLED=0` when launching the worker to use the publisher flow only.
+> Note: by default each download first tries the (hidden) Sci-Hub mirror list, then ResearchGate, and only falls back to the publisher's official page when both cannot deliver the PDF — the publisher flow simulates a normal manual download and never bypasses paywalls or verification mechanisms. Use `SCIHUB_ENABLED=0` / `RESEARCHGATE_ENABLED=0` when launching the worker to skip those sources.
 
 ### Project layout
 
@@ -141,10 +145,11 @@ web/
 | 渠道 | 用途 |
 |---|---|
 | [Crossref](https://www.crossref.org/) | 按 DOI / 标题检索论文元数据（标题、作者、年份、落地页） |
-| Sci-Hub 镜像 | **默认（不在界面显示）下载源**：按 DOI 依次尝试镜像列表（`sci-hub.al` → `www.tesble.com` → `www.wellesu.com`）；某个镜像无法打开时 30 秒后切换下一个 |
-| 出版商页面 | Sci-Hub 失败（未收录 / 镜像无法打开 / PDF 直链失败）后的回退方案：浏览器自动化打开文章页并触发 PDF 下载 |
+| Sci-Hub 镜像 | **默认（不在界面显示）下载源**：按 DOI 依次尝试镜像列表（`sci-hub.al` → `www.tesble.com` → `www.wellesu.com`）；镜像先返回 Cloudflare 挑战页（403“Just a moment…”）时会在每页等待时间内自动验证、等待页面加载出检索结果，而不是未加载完就放弃；镜像无法打开（30 秒超时）或停在首页 15 秒无检索页才切换下一个 |
+| ResearchGate | Sci-Hub 失败后的第二下载源：按 DOI 在 ResearchGate 检索，文献页存在公开全文（"Download full-text PDF"）时直接下载；检索与刷新沿用每页等待/刷新设置。确定性无全文结论（检索无结果 / 仅可 Request full-text / 无下载入口）记 `researchgate: unavailable`；页面被拦截 / 跳登录墙按下载失败处理，绝不标记 |
+| 出版商页面 | Sci-Hub 与 ResearchGate 均失败后的最终回退：浏览器自动化打开文章页并触发 PDF 下载 |
 
-> 说明：Sci-Hub 为内置默认策略，不在界面上显示任何选项；如需完全关闭（直接走出版商官方页面），启动浏览器 worker 时设置环境变量 `SCIHUB_ENABLED=0` 即可。
+> 说明：Sci-Hub 与 ResearchGate 均为内置默认策略，不在界面上显示任何选项。调试用环境开关：`SCIHUB_ENABLED=0` 跳过 Sci-Hub，`RESEARCHGATE_ENABLED=0` 跳过 ResearchGate，`OFFICIAL_ENABLED=0` 跳过官方页面；单篇 DOI 调试 ResearchGate 通道可用 `python -m paper_dl.rgdebug <DOI> [保存目录]`（强制关闭 Sci-Hub 与官方路径）。
 
 ### 安装
 
@@ -182,12 +187,15 @@ npm start
 
 **2. 扫盘与下载**
 
-- 设置本地目录（如 `/mnt/d/paper`），点击“扫描本地目录”检查清单中每篇文献的 PDF 是否已存在（**仅判断 PDF，不看信息文件**）；同时简单校验 PDF 是否正常（非空、头部含 `%PDF-`、尾部含 `%%EOF`），异常文件（0 字节、HTML 错误页、下载中断的残缺文件）按不存在处理，可重新下载；
-- 点击“下载缺失文件”依次下载缺失文献，保存结构为 `本地目录/期刊名/出版卷/文章名/`；下载过程中可点“停止下载”中断当前条目，再点“继续下载”从被中断的条目重新下载并继续队列；
+- 设置本地目录（如 `/mnt/d/paper`），点击“扫描本地目录”检查清单中每篇文献的 PDF 是否已存在（**仅判断 PDF，不看信息文件**）；同时简单校验 PDF 是否正常（非空、头部含 `%PDF-`、尾部含 `%%EOF`），异常文件（0 字节、HTML 错误页、下载中断的残缺文件）按不存在处理，可重新下载；在此基础上还有**深度质量检查**——对通过粗检的文件再验证交叉引用结构（`startxref` 指向 `xref` 表或 xref 流对象）、检测空字节填充与 HTML 伪装内容，识别“看着完整但实际打不开”的损坏 PDF：此类文件在**扫描时直接删除**（汇总显示“已删除损坏 PDF N 份”），下载队列轮到时自动重新下载；删除失败（文件被占用）时重新下载会覆盖旧文件；
+- 点击“下载缺失文件”依次下载缺失文献，保存结构为 `本地目录/期刊名/出版卷/文章名/`；下载过程中可点“停止下载”中断当前条目，再点“继续下载”从被中断的条目重新下载并继续队列；下载列表**只显示待处理文献**——已存在的与已下载成功的条目不再显示（汇总统计仍报告完整数量），列表聚焦缺失、失败与无权限文献，便于调试；
 - PDF 以 DOI 尾缀命名（如 DOI `10.1029/2025JC023188` → `2025JC023188.pdf`），同时生成同名 `.txt` 信息文件（标题、日期、作者、DOI 等，可取消勾选），每次下载后重新生成；
-- **权限记录（双路径）**：每次下载都会确认该文献的访问权限，并在其保存目录写入权限记录文件（`DOI尾缀.access.json`）。记录包含两个权限——`official`：官方网页（出版商）访问权限（`granted` / `denied`）；`scihub`：Sci-Hub 是否收录该文献（`available` / `unavailable`；`unavailable` **仅在检索结果页成功打开并明确报告未收录时标记**——镜像打不开 / HTTP 错误 / 网络波动一律按下载失败处理，不标记）。各路径只更新自己、保留另一路径的已知状态（旧版单 `access` 字段记录按 `official` 路径读取）。下载前始终自动扫描该记录：**仅当两条路径都标记为“无”**（`official: denied` 且 `scihub: unavailable`）时才直接跳过该篇——删除记录文件后可重试；扫盘结果会显示缺失条目中两条路径均标记为“无”的数量；
+- **权限记录（三路径）**：每次下载都会确认该文献的访问权限，并在其保存目录写入权限记录文件（`DOI尾缀.access.json`）。记录包含三个下载源——`official`：官方网页（出版商）访问权限（`granted` / `denied`）；`scihub`：Sci-Hub 是否收录该文献（`available` / `unavailable`；`unavailable` **仅在检索结果页成功打开并明确报告未收录时标记**——镜像打不开 / HTTP 错误 / 网络波动一律按下载失败处理，不标记）；`researchgate`：ResearchGate 是否有公开全文（`available` / `unavailable`；`unavailable` **仅在检索/文献页成功打开并明确显示无公开全文时标记**——检索无结果 / 仅可 Request full-text / 无下载入口三种确定性结论；页面被拦截、跳登录墙、网络波动一律按下载失败处理，不标记）。各路径只更新自己、保留其他路径的已知状态（旧版单 `access` 字段记录按 `official` 路径读取；缺少 `researchgate` 字段的记录视为未知，在 ResearchGate 补查之前不会跳过）。下载前始终自动扫描该记录：**仅当三条路径都标记为“无”**（`official: denied`、`scihub: unavailable` 且 `researchgate: unavailable`）时才直接跳过该篇——删除记录文件后可重试；扫盘结果会显示缺失条目中三条路径均标记为“无”的数量；
 - **信息文件**：每次成功下载都会自动生成配套信息文件（`.txt`），无需界面开关；
-- **下载方式**：浏览器自动化 + 内置默认策略（不在界面显示）——默认先用 Sci-Hub 镜像按 DOI 检索下载（`sci-hub.al` → `www.tesble.com` → `www.wellesu.com`，某个镜像无法打开 30 秒后自动切换下一个）；Sci-Hub 失败（未收录 / 镜像无法打开 / PDF 直链失败）后自动转文献官方页面下载：用 Playwright 驱动本机真实浏览器打开文章页、通过人机验证并触发 PDF 下载；设置环境变量 `SCIHUB_ENABLED=0` 可跳过 Sci-Hub 直接走官方页面；
+- **无权限时跳过对应下载源（三个选项）**：设置区可分别勾选 Sci-Hub / ResearchGate / 官方页面——勾选后，该下载源在权限记录为“无”时直接跳过，不再尝试；不勾选则即便记录为无也依旧尝试。三个源都被跳过时整篇直接跳过（不再打开任何页面）。
+- **ResearchGate “Request full-text” 处理**：文献页无公开全文、仅显示 “Request full-text” 时，会自动模拟点击向作者请求全文（含确认对话框的补充点击）——**不标记 researchgate 无权限**，随后继续官方页面下载；
+- **官网付费墙早判**：Springer / Wiley 等购买面板（“Log in via an institution / Buy article PDF / Institutional subscriptions / Get access to the full version…”）在页面加载后 5 秒内即可判定为无权限并立即跳过，不再按“无响应”空等整轮等待时间；
+- **下载方式**：浏览器自动化 + 内置默认策略（不在界面显示）——按 **Sci-Hub → ResearchGate → 官方页面** 的顺序尝试。先走 Sci-Hub 镜像按 DOI 检索下载（`sci-hub.al` → `www.tesble.com` → `www.wellesu.com`，某个镜像无法打开 30 秒后自动切换下一个）；失败后转 ResearchGate：按 DOI 检索文献页，存在公开全文（"Download full-text PDF"）即直接下载（检索等待与刷新沿用每页等待/无响应刷新设置；检索无结果 / 仅可 Request full-text / 无下载入口记 `researchgate: unavailable`，页面被拦截 / 跳登录墙按下载失败处理不标记）；仍失败最后转文献官方页面：用 Playwright 驱动本机真实浏览器打开文章页、通过人机验证并触发 PDF 下载。环境开关：`SCIHUB_ENABLED=0` / `RESEARCHGATE_ENABLED=0` / `OFFICIAL_ENABLED=0`；单篇调试 ResearchGate 用 `python -m paper_dl.rgdebug <DOI> [保存目录]`；
 - **浏览器选择**：浏览器自动化可按需指定所用浏览器（Chrome 默认 / 自动 / Edge / Firefox / Safari，保存在浏览器中，下次打开仍生效）；“自动”会依次尝试本机 Chrome、Edge、内置 Chromium，选中其他浏览器时下载时直接启动对应浏览器（切换浏览器会自动重建浏览器实例）；
 - **设置自动记忆**：本地目录、等待/刷新/验证/任务间隔、浏览器选择等全部设置会自动保存；下次打开网站自动恢复上次执行任务时的设置（保存在服务端 `server/state.json`，换浏览器打开也生效）；
 - **刷新**：下载过程中可点“⟳ 刷新”——保留当前输入（保存目录等设置不变），重置下载状态并重新扫盘，之后可再次点击“下载缺失文件”依次下载。
@@ -196,7 +204,7 @@ npm start
 
 当前待执行清单显示在“扫盘与下载”模块中（含条目数与文件列表）。网站打开时自动沿用**上次任务所用清单**；在“文献检索”生成清单、在此导入清单或生成未下载清单后，当前清单自动切换并持久化（`server/state.json`）。**支持多份清单同时激活**——扫描与下载按合并后的清单执行（按 DOI 去重）。
 
-- **导入任务清单（支持批量，单一入口）**：在输入框填入一份或多份清单 JSON 文件路径（绝对路径，或相对网站根目录的相对路径；多份清单用逗号 / 分号 / 换行分隔），点“导入任务清单”（或回车）载入；输入框为空时点击按钮会打开文件选择器，可一次选择多份清单文件——全部导入后合并设为当前待执行清单并自动重新扫盘；
+- **导入任务清单（支持批量，单一入口）**：在输入框填入一份或多份清单 JSON 文件路径（绝对路径，或相对网站根目录的相对路径；多份清单用逗号 / 分号 / 换行分隔），点“导入任务清单”（或回车）载入；输入框为空时点击按钮会打开文件选择器，可一次选择多份清单文件（实测 22 份期刊清单 / 约 21 万条一次性导入无报错）——全部导入后合并设为当前待执行清单并自动重新扫盘。存放在网站根目录的清单**只按文件名导入**（每次请求仅几 KB，大清单库也不会触发请求体上限）；根目录外的文件回退为逐份上传内容，请求体上限 512MB；
 - **生成未下载清单**：扫盘后可点击，按本地目录扫描结果把当前清单里**未下载的条目**按期刊分别另存为新清单（`任务清单-未下载-期刊名.json`，每刊一份，同名覆盖，不再追加序号）并自动切换为当前待执行清单；生成时会自动清理历史上带 `-1`/`-2` 序号的不合规清单文件；
 - **保存任务清单**：把当前待执行清单按期刊分别保存为 `任务清单-期刊名.json`（同名覆盖）。
 
@@ -212,7 +220,7 @@ npm start
 - 验证状态判定采用“连续两次干净检测”确认通过，避免页面跳转瞬间误判导致验证被中途打断；
 - **验证成功不误刷新**：Turnstile / reCAPTCHA 验证成功后其组件 iframe 仍会留在页面上，程序通过验证 token（隐藏输入框取值）判定“已通过”，不会把已通过的验证误判为仍在验证而刷新页面导致重新验证；验证通过后也不会再重复导航打断已开始的下载；
 - **弹出的子窗口（验证 / 下载入口）自动跟随**：出版商把流程放进子窗口时，程序会自动把新窗口置前（不会被主窗口遮挡），并自动切换到最新子窗口上进行检测与点击；请在子窗口内完成验证，避免点击子窗口以外区域（部分网站的子窗口失焦会自动关闭）。
-- **下载检测与落盘**：检测到 PDF 进入浏览器下载队列后等待下载完成，按命名规则移动/重命名到目标目录（原下载文件随即清除），自动生成信息文件，并把确认的访问权限按来源写入权限记录文件（Sci-Hub 下载记 `scihub: available`，出版商下载记 `official: granted`）；
+- **下载检测与落盘**：检测到 PDF 进入浏览器下载队列后等待下载完成，按命名规则移动/重命名到目标目录（原下载文件随即清除），自动生成信息文件，并把确认的访问权限按来源写入权限记录文件（Sci-Hub 下载记 `scihub: available`，ResearchGate 下载记 `researchgate: available`，出版商下载记 `official: granted`）；
 - **任务间隔**：相邻下载任务之间默认间隔 5 秒（可调），避免请求过密被网站判定为恶意行为；
 - **浏览器选择**：界面可选 自动 / Chrome / Edge / Firefox / Safari。Chrome / Edge / 自动 使用 Playwright 的 Chromium 通道；Firefox / Safari（WebKit 引擎）使用对应引擎，未安装时先执行 `python -m playwright install firefox` 或 `python -m playwright install webkit`；
 - Cookie 与登录态按浏览器族分别保存在本地浏览器配置目录中（Chromium 族共用一个目录，Firefox / WebKit 各自独立），机构登录一次后后续下载可自动通过。
@@ -226,7 +234,7 @@ pip install playwright && python -m playwright install chromium
 # python -m playwright install webkit
 ```
 
-> 说明：默认每篇文献先尝试（隐藏的）Sci-Hub 镜像列表下载，Sci-Hub 无法提供 PDF 时才回退到出版商官方页面——官方页面流程模拟正常的人工下载，不会绕过付费墙或验证机制。启动 worker 时设置 `SCIHUB_ENABLED=0` 可仅使用官方页面流程。
+> 说明：默认每篇文献按（隐藏的）Sci-Hub → ResearchGate → 官方页面顺序尝试下载，前两者都无法提供 PDF 时才回退到出版商官方页面——官方页面流程模拟正常的人工下载，不会绕过付费墙或验证机制。启动 worker 时设置 `SCIHUB_ENABLED=0` / `RESEARCHGATE_ENABLED=0` 可跳过对应下载源。
 
 ### 项目结构
 

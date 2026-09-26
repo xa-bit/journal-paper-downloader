@@ -80,8 +80,12 @@ const I18N = {
     verify_interval: "验证点击间隔（秒）",
     verify_max_fails: "验证失败几次后刷新",
     task_interval: "任务间隔（秒）",
+    skip_sources_label: "无权限时跳过对应下载源（勾选后，该下载源在权限记录为“无”时直接跳过；不勾选则依旧尝试）",
+    skip_scihub: "Sci-Hub 无权限时跳过",
+    skip_researchgate: "ResearchGate 无全文时跳过",
+    skip_official: "官网无权限时跳过",
     auto_access_hint_html:
-      "每次下载都会自动生成信息文件，并确认该文献的访问权限，在其保存目录写入权限记录文件（<code>DOI尾缀.access.json</code>），记录包含两个权限：官方网页权限（出版商允许 / 拒绝访问）与 Sci-Hub 是否收录。下载前自动扫描该记录：仅当两者都被标记为“无”时才直接跳过该篇（删除记录文件后可重试）；否则默认优先用 Sci-Hub 检索下载，失败再转出版商官方页面。",
+      "每次下载都会自动生成信息文件，并确认该文献的访问权限，在其保存目录写入权限记录文件（<code>DOI尾缀.access.json</code>），记录包含三个下载源：官方网页权限（出版商允许 / 拒绝访问）、Sci-Hub 是否收录与 ResearchGate 是否有公开全文。下载前自动扫描该记录：仅当三者都被标记为“无”时才直接跳过该篇（删除记录文件后可重试）；否则默认按 Sci-Hub → ResearchGate → 官方页面的顺序尝试下载。",
     auto_hint:
       "浏览器自动化会打开真实浏览器窗口：等待时间内无下载响应会自动刷新（超过刷新次数后跳过该篇）；遇到人机验证时每“验证点击间隔”秒自动模拟点击一次验证，连续“验证失败几次后刷新”次未通过会刷新页面重新验证（这些时间都算在每页等待时间内）；遇到登录身份验证时页面保持打开，等待你在浏览器中手动处理后自动继续。",
     import_ph:
@@ -188,9 +192,19 @@ const I18N = {
     st_missing: "✘ 缺失",
     with_txt: "（含信息文件）",
     without_txt: "（缺信息文件，重新下载时会重新生成）",
-    access_denied_note: "（权限记录：官方网页与 Sci-Hub 均标记为无，下载时直接跳过）",
+    access_denied_note: "（权限记录：官方网页 / Sci-Hub / ResearchGate 均标记为无，下载时直接跳过）",
     pdf_invalid_note: "（PDF 文件异常，已视为未下载，可重新下载）",
-    scan_denied_suffix: "，其中 {n} 篇官方网页与 Sci-Hub 均标记为无（下载时直接跳过）",
+    scan_denied_suffix: "，其中 {n} 篇官方网页 / Sci-Hub / ResearchGate 均标记为无（下载时直接跳过）",
+    // PDF 深度质量检查（扫盘时对粗检通过的文件验证结构；损坏文件当场删除待重下）
+    pdf_q_too_small: "文件过小，内容不完整",
+    pdf_q_no_startxref: "缺少交叉引用表（startxref）",
+    pdf_q_bad_xref: "交叉引用表（xref）损坏",
+    pdf_q_zero_filled: "文件主体为空字节数据",
+    pdf_q_html: "内容为网页而非 PDF",
+    pdf_q_read_failed: "文件读取失败",
+    pdf_quality_deleted_note: "（PDF 质量异常：{reason}，已删除，轮到时将重新下载）",
+    pdf_quality_keep_note: "（PDF 质量异常：{reason}，删除失败，重新下载时将覆盖）",
+    scan_deleted_suffix: "，已删除损坏 PDF {n} 份",
     st_downloading: "⏳ 下载中",
     downloading_n: "下载中… 第 {i} / {n} 篇（成功 {ok}，失败 {fail}，无权限 {na}）",
     st_ok: "✔ 成功",
@@ -284,8 +298,13 @@ const I18N = {
     verify_interval: "Verification click interval (s)",
     verify_max_fails: "Failed verifications before refresh",
     task_interval: "Interval between tasks (s)",
+    skip_sources_label:
+      "Skip a download source when it is recorded as no-access (checked: the source is skipped when its record says no; unchecked: it is retried anyway)",
+    skip_scihub: "Skip Sci-Hub when no access",
+    skip_researchgate: "Skip ResearchGate when no full text",
+    skip_official: "Skip publisher page when no access",
     auto_access_hint_html:
-      "Every download generates the info file automatically and confirms the paper's access rights, writing a permission record file (<code>&lt;DOI suffix&gt;.access.json</code>) into its target folder. The record carries two permissions: the publisher's official-page access (granted / denied) and whether Sci-Hub has the paper (indexed / not indexed). The record is scanned before every download: a paper is skipped only when both are marked as no (delete the record file to retry); otherwise Sci-Hub is tried first by default, falling back to the publisher's official page.",
+      "Every download generates the info file automatically and confirms the paper's access rights, writing a permission record file (<code>&lt;DOI suffix&gt;.access.json</code>) into its target folder. The record carries three download sources: the publisher's official-page access (granted / denied), whether Sci-Hub has the paper (indexed / not indexed), and whether ResearchGate has a public full text (available / unavailable). The record is scanned before every download: a paper is skipped only when all three are marked as no (delete the record file to retry); otherwise downloads are tried in the order Sci-Hub → ResearchGate → publisher page.",
     auto_hint:
       "Browser automation opens a real browser window: if there is no download response within the wait time it refreshes automatically (the article is skipped once the refresh limit is exceeded); on human-verification pages it simulates a verification click every “verification click interval” seconds, and after “failed verifications before refresh” consecutive failures it refreshes the page to verify again (all within the per-page wait time); on login pages the window stays open and downloading continues automatically once you finish signing in manually in the browser.",
     import_ph:
@@ -400,10 +419,22 @@ const I18N = {
     st_missing: "✘ Missing",
     with_txt: " (with info file)",
     without_txt: " (info file missing; it will be regenerated on re-download)",
-    access_denied_note: " (permission record: both official pages and Sci-Hub marked no; will be skipped at download time)",
+    access_denied_note: " (permission record: official pages / Sci-Hub / ResearchGate all marked no; will be skipped at download time)",
     pdf_invalid_note: " (corrupted PDF, treated as missing and safe to re-download)",
     scan_denied_suffix:
-      ", {n} of them are marked no on both official pages and Sci-Hub (skipped at download time)",
+      ", {n} of them are marked no on all of official pages / Sci-Hub / ResearchGate (skipped at download time)",
+    // PDF deep quality check (structure validation at scan time; corrupt files are deleted and re-downloaded)
+    pdf_q_too_small: "file too small, content incomplete",
+    pdf_q_no_startxref: "missing cross-reference table (startxref)",
+    pdf_q_bad_xref: "corrupt cross-reference table (xref)",
+    pdf_q_zero_filled: "body is zero-filled data",
+    pdf_q_html: "content is a web page, not a PDF",
+    pdf_q_read_failed: "file read failed",
+    pdf_quality_deleted_note:
+      " (corrupt PDF: {reason}; deleted at scan, will be re-downloaded)",
+    pdf_quality_keep_note:
+      " (corrupt PDF: {reason}; deletion failed, re-download will overwrite it)",
+    scan_deleted_suffix: ", {n} corrupt PDF(s) deleted",
     st_downloading: "⏳ Downloading",
     downloading_n: "Downloading… item {i} / {n} (ok {ok}, failed {fail}, no access {na})",
     st_ok: "✔ Done",

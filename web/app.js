@@ -821,6 +821,10 @@ function collectSettings() {
     verifyMaxFails: num("verify-max-fails"),
     intervalSec: num("task-interval"),
     browser: browserChoice,
+    // 分源“无权限时跳过”选项
+    skipSciHub: $("#skip-scihub").checked,
+    skipResearchGate: $("#skip-researchgate").checked,
+    skipOfficial: $("#skip-official").checked,
   };
 }
 
@@ -835,6 +839,14 @@ function applySettings(s) {
   setNum("verify-interval", s.verifyInterval);
   setNum("verify-max-fails", s.verifyMaxFails);
   setNum("task-interval", s.intervalSec);
+  // 三个跳过选项：服务端已保存的值为准；未保存过时保持 HTML 默认（勾选）
+  for (const [key, id] of [
+    ["skipSciHub", "skip-scihub"],
+    ["skipResearchGate", "skip-researchgate"],
+    ["skipOfficial", "skip-official"],
+  ]) {
+    if (typeof s[key] === "boolean") $("#" + id).checked = s[key];
+  }
   if (BROWSER_CHOICES.includes(s.browser)) {
     browserChoice = s.browser;
     saveBrowserChoice();
@@ -878,6 +890,9 @@ function readDownloadOptions() {
     verifyInterval: num("#verify-interval", 1, 120, 5),
     verifyMaxFails: num("#verify-max-fails", 1, 50, 5),
     intervalSec: num("#task-interval", 0, 300, 5),
+    skipSciHub: $("#skip-scihub").checked,
+    skipResearchGate: $("#skip-researchgate").checked,
+    skipOfficial: $("#skip-official").checked,
   };
 }
 
@@ -973,6 +988,9 @@ async function refreshManifestInfo() {
 }
 
 let scanResult = null;
+// 下载列表中隐藏的条目（已下载成功/已存在）：仅显示缺失、失败与无权限条目，
+// 便于针对失败文献调试；汇总统计不受影响（仍报告已存在/成功数量）
+let hiddenScanEntries = new Set();
 
 // ---------------------------------------------------------------------------
 // 任务清单操作：保存 / 导入 / 生成未下载清单（当前待执行清单自动切换并持久化）
@@ -984,6 +1002,7 @@ function resetScanState() {
   hideAuthBanner();
   dlSession = null;
   scanResult = null;
+  hiddenScanEntries = new Set();
   $("#scan-list").innerHTML = "";
   $("#scan-summary").textContent = "";
   $("#fetch-btn").disabled = true;
@@ -1085,30 +1104,51 @@ async function onImportList() {
   }
 }
 
-/** 文件选择器返回后：读取所选清单内容批量上传导入（服务端按期刊落盘并激活） */
+/** 文件选择器返回后：优先按文件名从站点根目录直接导入（清单通常就存放在网站
+ *  根目录，只传文件名——请求体仅几 KB，避免把几十 MB 的清单内容整包上传导致
+ *  请求体超限被断连）；根目录中不存在的文件再逐份上传内容（单份请求体小）。
+ *  全部就绪后统一激活为当前待执行清单并重新扫盘。 */
 async function onPickListFiles() {
   const input = $("#import-file-input");
   const files = [...(input.files || [])];
   input.value = ""; // 允许再次选择同一批文件
   if (!files.length) return;
+  const btn = $("#import-btn");
+  btn.disabled = true;
   $("#list-msg").textContent = t("import_reading", { n: files.length });
   try {
-    const uploaded = await Promise.all(
-      files.map(
-        (f) =>
-          new Promise((resolve, reject) => {
-            const reader = new FileReader();
-            reader.onload = () => resolve({ name: f.name, content: String(reader.result || "") });
-            reader.onerror = () => reject(new Error(f.name));
-            reader.readAsText(f, "utf8");
-          })
-      )
-    );
-    const r = await api("/api/list/import", { files: uploaded });
+    // 第一步：按文件名导入根目录中已存在的清单（暂不激活）
+    let r = await api("/api/list/import", {
+      names: files.map((f) => f.name),
+      activate: false,
+    });
     if (!r.ok) throw new Error(r.error || t("import_failed"));
-    await afterImportLists(r);
+    const paths = (r.lists || []).map((l) => l.path);
+    const missingNames = r.missing || [];
+    // 第二步：根目录没有的文件，逐份读取上传内容（每次请求只带一份）
+    for (const f of files.filter((f) => missingNames.includes(f.name))) {
+      const content = await new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(String(reader.result || ""));
+        reader.onerror = () => reject(new Error(f.name));
+        reader.readAsText(f, "utf8");
+      });
+      r = await api("/api/list/import", {
+        files: [{ name: f.name, content }],
+        activate: false,
+      });
+      if (!r.ok) throw new Error(r.error || t("import_failed"));
+      paths.push(...(r.lists || []).map((l) => l.path));
+    }
+    if (!paths.length) throw new Error(t("import_failed"));
+    // 第三步：把全部清单统一激活为当前待执行清单
+    const final = await api("/api/list/import", { paths });
+    if (!final.ok) throw new Error(final.error || t("import_failed"));
+    await afterImportLists(final);
   } catch (err) {
     $("#list-msg").textContent = t("import_fail") + err.message;
+  } finally {
+    btn.disabled = false;
   }
 }
 
@@ -1151,6 +1191,7 @@ async function onScan() {
     const r = await api("/api/scan", { root });
     if (!r.ok) throw new Error(r.error || t("scan_failed"));
     scanResult = r;
+    hiddenScanEntries = new Set(); // 新扫盘：重新显示全部待处理条目
     dlSession = null;
     setDownloadButtons("idle");
     renderScanList();
@@ -1159,6 +1200,7 @@ async function onScan() {
         ? t("manifest_empty")
         : t("scan_summary", { n: r.total, e: r.exists, m: r.missing });
     if (r.noAccessMarked > 0) summary += t("scan_denied_suffix", { n: r.noAccessMarked });
+    if (r.qualityDeleted > 0) summary += t("scan_deleted_suffix", { n: r.qualityDeleted });
     $("#scan-summary").textContent = summary;
     $("#fetch-btn").disabled = r.missing === 0;
     $("#undone-btn").disabled = r.total === 0; // 扫盘后可按缺失条目生成未下载清单
@@ -1176,12 +1218,13 @@ function renderScanList() {
   list.innerHTML = "";
   if (!scanResult) return;
   scanResult.entries.forEach((entry, i) => {
+    // 只显示待处理条目：已存在（此前已成功下载）与本次已下载成功的条目不再显示，
+    // 列表聚焦缺失 / 失败 / 无权限文献，便于调试；汇总统计不含此过滤
+    if (entry.pdfExists || hiddenScanEntries.has(entry.index)) return;
     const li = document.createElement("li");
     li.className = "download-item";
     li.id = "scan-" + i;
-    const status = entry.pdfExists
-      ? `<span class="status ok">${t("st_exists")}</span>`
-      : `<span class="status pending">${t("st_missing")}</span>`;
+    const status = `<span class="status pending">${t("st_missing")}</span>`;
     // 文件在磁盘上（含 PDF 异常的条目）才报告信息文件状态
     const txtNote =
       entry.pdfExists || entry.pdfInvalid
@@ -1191,6 +1234,13 @@ function renderScanList() {
       : "";
     // PDF 文件异常（残缺 / HTML 错误页等）：已按不存在处理，提示会重新下载
     const invalidNote = entry.pdfInvalid ? t("pdf_invalid_note") : "";
+    // PDF 质量异常（粗检通过但结构损坏、无法打开）：扫描时已删除（或删除失败将覆盖），
+    // 下载队列轮到时自动重新下载
+    const qualityNote = entry.qualityIssue
+      ? entry.qualityDeleted
+        ? t("pdf_quality_deleted_note", { reason: t("pdf_q_" + entry.qualityIssue) })
+        : t("pdf_quality_keep_note", { reason: t("pdf_q_" + entry.qualityIssue) })
+      : "";
     // 缺失且权限记录两条路径（官方网页 / Sci-Hub）均标记为“无”的条目：
     // 下载前扫描（始终开启）会直接跳过
     const accessNote =
@@ -1198,7 +1248,7 @@ function renderScanList() {
     li.innerHTML = `
       ${status}
       <span class="dl-title">${escapeHtml(entry.title || entry.doi)}</span>
-      <span class="dl-detail">${escapeHtml(entry.rel + "/" + entry.stem + ".pdf")} ${txtNote}${escapeHtml(invalidNote)}${escapeHtml(accessNote)}</span>
+      <span class="dl-detail">${escapeHtml(entry.rel + "/" + entry.stem + ".pdf")} ${txtNote}${escapeHtml(invalidNote)}${escapeHtml(qualityNote)}${escapeHtml(accessNote)}</span>
     `;
     list.appendChild(li);
   });
@@ -1268,15 +1318,18 @@ async function runDownloadLoop() {
         maxRefresh: opts.maxRefresh,
         verifyInterval: opts.verifyInterval,
         verifyMaxFails: opts.verifyMaxFails,
+        skipSciHub: opts.skipSciHub === true,
+        skipResearchGate: opts.skipResearchGate === true,
+        skipOfficial: opts.skipOfficial === true,
+        // 质量损坏文件：扫描时删除失败（文件被占用等）时覆盖旧文件重新下载
+        overwrite: entry.qualityIssue ? true : undefined,
       });
       stopStatusPolling();
       if (r.ok) {
         s.ok += 1;
-        if (li) {
-          li.querySelector(".status").outerHTML = `<span class="status ok">${t("st_ok")}</span>`;
-          li.querySelector(".dl-detail").textContent =
-            t("ba_prefix") + r.path + (r.info_path ? t("info_file_suffix", { p: r.info_path }) : "");
-        }
+        // 下载成功：从列表移除该条目（此后仅显示缺失/失败/无权限，便于调试）
+        hiddenScanEntries.add(entry.index);
+        if (li) li.remove();
       } else {
         if (s.stopped) break; // 停止导致的错误不计入失败
         if (r.no_access) {
@@ -1433,6 +1486,10 @@ $("#library-import-btn").addEventListener("click", onLibraryImport);
 // 设置变更自动保存（防抖），下次打开网站自动恢复
 for (const id of SETTINGS_INPUT_IDS) {
   document.getElementById(id).addEventListener("input", scheduleSettingsSave);
+}
+// 三个“无权限时跳过”复选框（change 事件 + 自动保存）
+for (const id of ["skip-scihub", "skip-researchgate", "skip-official"]) {
+  document.getElementById(id).addEventListener("change", scheduleSettingsSave);
 }
 
 // ---------------------------------------------------------------------------
